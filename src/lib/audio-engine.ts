@@ -1,13 +1,18 @@
 /**
  * AudioEngine - Framework-agnostic Web Audio API wrapper
  *
- * Handles audio input capture and time-domain analysis.
- * Uses AnalyserNode for now - designed to be replaceable with AudioWorklet later.
+ * Handles audio input capture, time-domain analysis, and AudioWorklet-based
+ * feature extraction. Uses AnalyserNode for waveform data and a custom
+ * AudioWorklet for real-time audio features.
  *
- * Extension point: Replace AnalyserNode with AudioWorklet for advanced
- * frequency analysis or custom DSP processing. The public API (init,
- * getTimeDomainData, destroy) should remain stable.
+ * Extension points:
+ * - Replace message-based worklet communication with SharedArrayBuffer for
+ *   zero-copy transfer. Requires COEP/COOP headers and Atomics for sync.
+ * - Add more features to AudioFeatures type (beat detection, tempo, etc.)
+ * - Visuals/DMX can consume features via getLatestFeatures() in rAF loop
  */
+
+import type { AudioFeatures } from './audio-features';
 
 export class AudioEngine {
   private audioContext: AudioContext | null = null;
@@ -15,8 +20,16 @@ export class AudioEngine {
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private analyserNode: AnalyserNode | null = null;
 
+  // AudioWorklet nodes
+  private workletNode: AudioWorkletNode | null = null;
+  private silentGainNode: GainNode | null = null;
+
+  // Latest features received from worklet
+  private latestFeatures: AudioFeatures | null = null;
+
   /**
    * Initialize audio capture with optional device selection.
+   * Sets up both AnalyserNode (for waveform) and AudioWorklet (for features).
    *
    * @param deviceId - Optional audio input device ID from enumerateDevices()
    */
@@ -38,16 +51,36 @@ export class AudioEngine {
       latencyHint: 'interactive',
     });
 
-    // Connect source -> analyser
-    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-    this.analyserNode = this.audioContext.createAnalyser();
+    // Load the AudioWorklet module
+    await this.audioContext.audioWorklet.addModule('/audio-worklet/vj0-audio-processor.js');
 
-    // Configure analyser for time-domain data
-    // 2048 gives good resolution without excessive CPU usage
+    // Create source node from media stream
+    this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+    // AnalyserNode for waveform (existing functionality)
+    this.analyserNode = this.audioContext.createAnalyser();
     this.analyserNode.fftSize = 2048;
 
+    // AudioWorkletNode for feature extraction
+    this.workletNode = new AudioWorkletNode(this.audioContext, 'vj0-audio-processor');
+
+    // Silent gain node to keep the graph valid without feedback
+    // Connect worklet output here instead of destination to avoid playback
+    this.silentGainNode = this.audioContext.createGain();
+    this.silentGainNode.gain.value = 0;
+
+    // Connect the audio graph:
+    // source -> analyser (for waveform)
+    // source -> worklet -> silentGain -> destination (for features, no audio output)
     this.sourceNode.connect(this.analyserNode);
-    // Note: Not connecting to destination - we only analyze, don't play back
+    this.sourceNode.connect(this.workletNode);
+    this.workletNode.connect(this.silentGainNode);
+    this.silentGainNode.connect(this.audioContext.destination);
+
+    // Listen for features from the worklet
+    this.workletNode.port.onmessage = (event: MessageEvent<AudioFeatures>) => {
+      this.latestFeatures = event.data;
+    };
   }
 
   /**
@@ -69,6 +102,20 @@ export class AudioEngine {
   }
 
   /**
+   * Get the most recently computed audio features from the worklet.
+   *
+   * Returns null if:
+   * - Audio engine not initialized
+   * - No features received yet from worklet
+   *
+   * Usage: Poll this in requestAnimationFrame for visuals/DMX mapping.
+   * Do NOT put directly into React state at 60fps - use refs or throttling.
+   */
+  getLatestFeatures(): AudioFeatures | null {
+    return this.latestFeatures;
+  }
+
+  /**
    * Clean up all audio resources.
    * Call this when unmounting the component or switching devices.
    */
@@ -79,13 +126,27 @@ export class AudioEngine {
       this.mediaStream = null;
     }
 
-    // Disconnect nodes
+    // Disconnect and clean up worklet
+    if (this.workletNode) {
+      this.workletNode.port.onmessage = null;
+      this.workletNode.disconnect();
+      this.workletNode = null;
+    }
+
+    // Disconnect silent gain
+    if (this.silentGainNode) {
+      this.silentGainNode.disconnect();
+      this.silentGainNode = null;
+    }
+
+    // Disconnect source and analyser
     if (this.sourceNode) {
       this.sourceNode.disconnect();
       this.sourceNode = null;
     }
 
     this.analyserNode = null;
+    this.latestFeatures = null;
 
     // Close audio context
     if (this.audioContext) {
@@ -94,4 +155,3 @@ export class AudioEngine {
     }
   }
 }
-

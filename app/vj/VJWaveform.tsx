@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { AudioEngine } from '@/src/lib/audio-engine';
 import { WaveformRenderer } from '@/src/lib/waveform-renderer';
+import type { AudioFeatures } from '@/src/lib/audio-features';
 
 type Status = 'idle' | 'requesting' | 'running' | 'error';
 
@@ -21,6 +22,10 @@ export function VJWaveform() {
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+
+  // Debug panel state - throttled to 10fps to avoid React overhead
+  const [debugFeatures, setDebugFeatures] = useState<AudioFeatures | null>(null);
+  const [showDebug, setShowDebug] = useState<boolean>(true);
 
   // Fetch available audio input devices
   const fetchDevices = useCallback(async () => {
@@ -91,6 +96,21 @@ export function VJWaveform() {
     setSelectedDeviceId(deviceId);
     initAudio(deviceId || undefined);
   }, [initAudio]);
+
+  // Debug features polling - throttled to ~10fps to minimize React re-renders
+  useEffect(() => {
+    if (!showDebug) return;
+
+    const interval = setInterval(() => {
+      const engine = engineRef.current;
+      if (engine) {
+        const features = engine.getLatestFeatures();
+        setDebugFeatures(features);
+      }
+    }, 100); // 10fps
+
+    return () => clearInterval(interval);
+  }, [showDebug]);
 
   // Initial setup
   useEffect(() => {
@@ -165,6 +185,33 @@ export function VJWaveform() {
         />
       </div>
 
+      {/* Debug toggle */}
+      <button
+        onClick={() => setShowDebug(!showDebug)}
+        className="self-start text-xs font-mono text-neutral-500 hover:text-neutral-300 transition-colors"
+      >
+        {showDebug ? 'Hide' : 'Show'} Audio Features Debug
+      </button>
+
+      {/* Debug panel - AudioFeatures display */}
+      {showDebug && (
+        <div className="bg-neutral-900/80 border border-neutral-700 rounded-lg p-4 font-mono text-xs">
+          <div className="text-neutral-400 uppercase tracking-wide mb-3">Audio Features</div>
+          {debugFeatures ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <FeatureBar label="RMS" value={debugFeatures.rms} />
+              <FeatureBar label="Peak" value={debugFeatures.peak} />
+              <FeatureBar label="Low" value={debugFeatures.energyLow} color="text-red-400" barColor="bg-red-500" />
+              <FeatureBar label="Mid" value={debugFeatures.energyMid} color="text-yellow-400" barColor="bg-yellow-500" />
+              <FeatureBar label="High" value={debugFeatures.energyHigh} color="text-cyan-400" barColor="bg-cyan-500" />
+              <FeatureBar label="Centroid" value={debugFeatures.spectralCentroid} color="text-purple-400" barColor="bg-purple-500" />
+            </div>
+          ) : (
+            <div className="text-neutral-500">Waiting for audio data...</div>
+          )}
+        </div>
+      )}
+
       {/* Footer hint */}
       <p className="text-xs text-neutral-500 font-mono">
         vj0 - Audio waveform visualization. Connect a USB audio interface for best results.
@@ -173,3 +220,35 @@ export function VJWaveform() {
   );
 }
 
+/**
+ * Individual feature bar component for debug display.
+ * Shows label, numeric value, and visual bar.
+ */
+function FeatureBar({
+  label,
+  value,
+  color = 'text-emerald-400',
+  barColor = 'bg-emerald-500',
+}: {
+  label: string;
+  value: number;
+  color?: string;
+  barColor?: string;
+}) {
+  const percentage = Math.min(100, Math.max(0, value * 100));
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex justify-between items-baseline">
+        <span className="text-neutral-400">{label}</span>
+        <span className={color}>{value.toFixed(3)}</span>
+      </div>
+      <div className="h-1.5 bg-neutral-800 rounded-full overflow-hidden">
+        <div
+          className={`h-full ${barColor} transition-all duration-75`}
+          style={{ width: `${percentage}%` }}
+        />
+      </div>
+    </div>
+  );
+}
