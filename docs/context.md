@@ -52,7 +52,8 @@ vj0/
 │   ├── context.md            # This file – project context for contributors
 │   └── stories/              # User stories and feature specs
 │       ├── 001_init.md       # Initial story: audio waveform visualization
-│       └── 002_audio_worklet.md # AudioWorklet-based audio features bus
+│       ├── 002_audio_worklet.md # AudioWorklet-based audio features bus
+│       └── 003_scenes.md     # Scene system: VjScene + VisualEngine
 │
 ├── public/                   # Static assets
 │   ├── *.svg                 # Various icons (Next.js defaults)
@@ -63,7 +64,12 @@ vj0/
 │   └── lib/                  # Framework-agnostic modules
 │       ├── audio-engine.ts   # Web Audio API + AudioWorklet abstraction
 │       ├── audio-features.ts # AudioFeatures type definition
-│       └── waveform-renderer.ts # Canvas rendering (implemented)
+│       └── scenes/           # Scene system
+│           ├── types.ts      # VjScene interface
+│           ├── visual-engine.ts # Scene manager + render loop
+│           ├── waveform-scene.ts # Waveform visualization
+│           ├── spectrum-bars-scene.ts # Spectrum analyzer bars
+│           └── index.ts      # Scene registry + exports
 │
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
@@ -84,24 +90,25 @@ vj0/
 │                        Next.js App (React)                       │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                    React Components                          ││
-│  │  - VJWaveform (canvas + status + debug panel)               ││
+│  │  - VJWaveform (canvas + status + scene selector + debug)    ││
 │  │  - Device selector (audio input dropdown)                   ││
 │  └───────────────────────┬─────────────────────────────────────┘│
 │                          │ uses (no React state for buffers)    │
 │  ┌───────────────────────▼─────────────────────────────────────┐│
 │  │              Framework-Agnostic Core Modules                 ││
 │  │  ┌─────────────────┐    ┌─────────────────────────┐         ││
-│  │  │  AudioEngine    │    │   WaveformRenderer      │         ││
-│  │  │  - Web Audio API│    │   - Canvas 2D           │         ││
-│  │  │  - AnalyserNode │───▶│   - requestAnimationFrame│        ││
-│  │  │  - AudioWorklet │    │   (→WebGL/WebGPU)       │         ││
-│  │  └────────┬────────┘    └─────────────────────────┘         ││
-│  │           │ MessagePort                                      ││
-│  │  ┌────────▼────────┐                                        ││
-│  │  │ vj0-audio-      │ (runs in AudioWorklet thread)          ││
-│  │  │ processor.js    │                                        ││
-│  │  │ → AudioFeatures │                                        ││
-│  │  └─────────────────┘                                        ││
+│  │  │  AudioEngine    │    │   VisualEngine          │         ││
+│  │  │  - Web Audio API│    │   - Scene manager       │         ││
+│  │  │  - AnalyserNode │───▶│   - Single rAF loop     │         ││
+│  │  │  - AudioWorklet │    │   - Canvas 2D context   │         ││
+│  │  └────────┬────────┘    └───────────┬─────────────┘         ││
+│  │           │ MessagePort             │ delegates to           ││
+│  │  ┌────────▼────────┐    ┌───────────▼─────────────┐         ││
+│  │  │ vj0-audio-      │    │   VjScene (interface)   │         ││
+│  │  │ processor.js    │    │   - WaveformScene       │         ││
+│  │  │ → AudioFeatures │    │   - SpectrumBarsScene   │         ││
+│  │  └─────────────────┘    │   - (extensible)        │         ││
+│  │                         └─────────────────────────┘         ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -109,7 +116,7 @@ vj0/
                               ▼
         ┌─────────────┬───────────────┬─────────────┐
         │  AI Module  │  DMX Module   │  WebGPU     │
-        │  (cloud GPU)│  (WebUSB)     │  Renderer   │
+        │  (cloud GPU)│  (WebUSB)     │  Scenes     │
         └─────────────┴───────────────┴─────────────┘
 ```
 
@@ -142,15 +149,34 @@ vj0/
 - Posts AudioFeatures to main thread via MessagePort
 - **Design**: Processes every quantum (~128 samples at 44.1kHz), throttles message posting
 
-#### WaveformRenderer (`waveform-renderer.ts`)
+#### VisualEngine (`scenes/visual-engine.ts`)
 
 - Pure TypeScript class (no React dependency)
-- Handles: Canvas 2D context, `requestAnimationFrame` loop
+- Manages single `requestAnimationFrame` loop, canvas context, and active scene
+- Delegates rendering to current `VjScene` implementation
 - API:
-  - `constructor(canvas: HTMLCanvasElement)` – Setup context
-  - `start(callback, buffer)` – Begin render loop
-  - `stop()` – Cancel animation frame
-- **Extension point**: Swap Canvas 2D for WebGL/WebGPU renderer
+  - `constructor(canvas, audioEngine, scenes)` – Setup with canvas, audio source, and scene registry
+  - `start()` / `stop()` – Control render loop
+  - `setSceneById(id)` – Switch active scene
+  - `getCurrentScene()` / `getScenes()` – Query scene state
+  - `handleResize(width, height)` – Update canvas dimensions
+  - `destroy()` – Cleanup resources
+- **Extension point**: Add scene transitions, layer compositing, post-processing effects
+
+#### VjScene Interface (`scenes/types.ts`)
+
+- Contract for all visual scenes
+- Properties: `id`, `name` (readonly)
+- Lifecycle: `init?(canvas)`, `resize?(width, height)`, `destroy?()`
+- Render: `render(ctx, features, timeDomain, dt)` – Called every frame
+- **Design**: Scenes are self-contained, stateless between frames, receive all data via render params
+
+#### Scene Registry (`scenes/index.ts`)
+
+- `SCENES` array of instantiated `VjScene` implementations
+- First scene is default
+- Adding scenes: implement `VjScene`, add instance to array
+- **Design**: Simple, no dynamic loading; future: lazy loading for heavy scenes
 
 ### Design Principles
 
@@ -196,6 +222,13 @@ vj0/
 - Pages: `page.tsx` (Next.js convention)
 - AudioWorklet processors: `public/audio-worklet/*.js` (plain JS, not TypeScript)
 
+### No Legacy Code Policy
+
+- **Delete** deprecated code immediately when replaced—do not keep "for reference"
+- **No** `@deprecated` annotations—if code is deprecated, it should be deleted
+- **No** backward-compatibility shims or fallbacks for removed features
+- Code should always reflect the current architecture; history lives in git
+
 ---
 
 ## 📚 Documentation Structure
@@ -231,10 +264,11 @@ User stories follow a structured format:
 ### Extension Points (marked in code)
 
 1. **SharedArrayBuffer**: Replace MessagePort in `audio-engine.ts` for zero-copy audio features
-2. **WebGL/WebGPU**: Swap Canvas 2D in `waveform-renderer.ts`
-3. **DMX Module**: Consume AudioFeatures for light control
-4. **AI Module**: Process canvas frames
-5. **Beat Detection**: Add `beat`/`tempo` to AudioFeatures in worklet
+2. **WebGL/WebGPU Scenes**: Create new `VjScene` implementations using WebGL/WebGPU instead of Canvas 2D
+3. **Scene Transitions**: Add transition effects in `VisualEngine` when switching scenes
+4. **DMX Module**: Consume AudioFeatures for light control
+5. **AI Module**: Process canvas frames
+6. **Beat Detection**: Add `beat`/`tempo` to AudioFeatures in worklet
 
 ### Browser Compatibility
 

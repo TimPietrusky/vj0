@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { AudioEngine } from '@/src/lib/audio-engine';
-import { WaveformRenderer } from '@/src/lib/waveform-renderer';
+import { VisualEngine, SCENES } from '@/src/lib/scenes';
 import type { AudioFeatures } from '@/src/lib/audio-features';
 
 type Status = 'idle' | 'requesting' | 'running' | 'error';
@@ -14,14 +14,14 @@ interface AudioDevice {
 
 export function VJWaveform() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const engineRef = useRef<AudioEngine | null>(null);
-  const rendererRef = useRef<WaveformRenderer | null>(null);
-  const bufferRef = useRef<Float32Array | null>(null);
+  const audioEngineRef = useRef<AudioEngine | null>(null);
+  const visualEngineRef = useRef<VisualEngine | null>(null);
 
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [currentSceneId, setCurrentSceneId] = useState<string>(SCENES[0].id);
 
   // Debug panel state - throttled to 10fps to avoid React overhead
   const [debugFeatures, setDebugFeatures] = useState<AudioFeatures | null>(null);
@@ -49,13 +49,13 @@ export function VJWaveform() {
     if (!canvas) return;
 
     // Cleanup previous instances
-    if (rendererRef.current) {
-      rendererRef.current.stop();
-      rendererRef.current = null;
+    if (visualEngineRef.current) {
+      visualEngineRef.current.stop();
+      visualEngineRef.current = null;
     }
-    if (engineRef.current) {
-      engineRef.current.destroy();
-      engineRef.current = null;
+    if (audioEngineRef.current) {
+      audioEngineRef.current.destroy();
+      audioEngineRef.current = null;
     }
 
     setStatus('requesting');
@@ -63,24 +63,19 @@ export function VJWaveform() {
 
     try {
       // Create and initialize audio engine
-      const engine = new AudioEngine();
-      await engine.init(deviceId);
-      engineRef.current = engine;
+      const audioEngine = new AudioEngine();
+      await audioEngine.init(deviceId);
+      audioEngineRef.current = audioEngine;
 
-      // Create renderer
-      const renderer = new WaveformRenderer(canvas);
-      rendererRef.current = renderer;
+      // Create visual engine with all scenes
+      const visualEngine = new VisualEngine(canvas, audioEngine, SCENES);
+      visualEngineRef.current = visualEngine;
 
-      // Allocate buffer once (reused every frame)
-      const buffer = new Float32Array(engine.bufferSize);
-      bufferRef.current = buffer;
-
-      // Start render loop - callback fills buffer with audio data
-      renderer.start((buf) => {
-        engine.getTimeDomainData(buf);
-      }, buffer);
+      // Start render loop
+      visualEngine.start();
 
       setStatus('running');
+      setCurrentSceneId(visualEngine.getCurrentScene().id);
 
       // Refresh device list (labels become available after permission)
       fetchDevices();
@@ -97,12 +92,21 @@ export function VJWaveform() {
     initAudio(deviceId || undefined);
   }, [initAudio]);
 
+  // Handle scene selection change
+  const handleSceneChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    const sceneId = e.target.value;
+    const engine = visualEngineRef.current;
+    if (engine && engine.setSceneById(sceneId)) {
+      setCurrentSceneId(sceneId);
+    }
+  }, []);
+
   // Debug features polling - throttled to ~10fps to minimize React re-renders
   useEffect(() => {
     if (!showDebug) return;
 
     const interval = setInterval(() => {
-      const engine = engineRef.current;
+      const engine = audioEngineRef.current;
       if (engine) {
         const features = engine.getLatestFeatures();
         setDebugFeatures(features);
@@ -119,18 +123,18 @@ export function VJWaveform() {
 
     return () => {
       // Cleanup on unmount
-      if (rendererRef.current) {
-        rendererRef.current.stop();
+      if (visualEngineRef.current) {
+        visualEngineRef.current.stop();
       }
-      if (engineRef.current) {
-        engineRef.current.destroy();
+      if (audioEngineRef.current) {
+        audioEngineRef.current.destroy();
       }
     };
   }, [fetchDevices, initAudio]);
 
   return (
     <div className="flex flex-col gap-4 w-full max-w-4xl mx-auto p-4">
-      {/* Header with status and device selector */}
+      {/* Header with status, device selector, and scene selector */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <span className="text-sm font-mono uppercase tracking-wide text-neutral-400">
@@ -152,21 +156,36 @@ export function VJWaveform() {
           </span>
         </div>
 
-        {/* Device selector */}
-        {devices.length > 1 && (
+        <div className="flex items-center gap-3">
+          {/* Scene selector */}
           <select
-            value={selectedDeviceId}
-            onChange={handleDeviceChange}
+            value={currentSceneId}
+            onChange={handleSceneChange}
             className="bg-neutral-900 border border-neutral-700 text-neutral-200 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-emerald-500"
           >
-            <option value="">Default device</option>
-            {devices.map((device) => (
-              <option key={device.deviceId} value={device.deviceId}>
-                {device.label}
+            {SCENES.map((scene) => (
+              <option key={scene.id} value={scene.id}>
+                {scene.name}
               </option>
             ))}
           </select>
-        )}
+
+          {/* Device selector */}
+          {devices.length > 1 && (
+            <select
+              value={selectedDeviceId}
+              onChange={handleDeviceChange}
+              className="bg-neutral-900 border border-neutral-700 text-neutral-200 text-sm rounded px-3 py-1.5 focus:outline-none focus:border-emerald-500"
+            >
+              <option value="">Default device</option>
+              {devices.map((device) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
       </div>
 
       {/* Error message */}
@@ -214,7 +233,7 @@ export function VJWaveform() {
 
       {/* Footer hint */}
       <p className="text-xs text-neutral-500 font-mono">
-        vj0 - Audio waveform visualization. Connect a USB audio interface for best results.
+        vj0 - Audio-reactive visuals. Select a scene and connect a USB audio interface for best results.
       </p>
     </div>
   );
