@@ -217,6 +217,10 @@ User stories follow a structured format:
 
 ## ⚠️ Important Notes for Contributors
 
+### Testing and Development
+
+- **No dev server or browser testing required** – Audio functionality requires real browser microphone permissions, which automated testing tools cannot grant. Code verification is sufficient; manual testing in a real browser is expected for audio features.
+
 ### Performance Critical Areas
 
 - **Never** allocate in the render loop (`start()` callback)
