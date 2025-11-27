@@ -42,7 +42,10 @@ vj0/
 │   ├── layout.tsx            # Root layout with fonts and metadata
 │   ├── page.tsx              # Home page (currently default Next.js starter)
 │   ├── globals.css           # Global styles + Tailwind config
-│   └── favicon.ico           # App favicon
+│   ├── favicon.ico           # App favicon
+│   └── vj/                   # VJ visualization route
+│       ├── page.tsx          # VJ page (server component wrapper)
+│       └── VJWaveform.tsx    # Waveform client component
 │
 ├── docs/                     # Documentation
 │   ├── context.md            # This file – project context for contributors
@@ -52,10 +55,10 @@ vj0/
 ├── public/                   # Static assets
 │   └── *.svg                 # Various icons (Next.js defaults)
 │
-├── src/                      # Source code (to be created)
+├── src/                      # Source code
 │   └── lib/                  # Framework-agnostic modules
-│       ├── audio-engine.ts   # Web Audio API abstraction
-│       └── waveform-renderer.ts # Canvas rendering
+│       ├── audio-engine.ts   # Web Audio API abstraction (implemented)
+│       └── waveform-renderer.ts # Canvas rendering (implemented)
 │
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
@@ -99,7 +102,7 @@ vj0/
         └─────────────┴───────────────┴─────────────┘
 ```
 
-### Core Modules (planned in `src/lib/`)
+### Core Modules (`src/lib/`)
 
 #### AudioEngine (`audio-engine.ts`)
 
