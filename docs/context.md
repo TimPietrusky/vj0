@@ -41,7 +41,7 @@
 vj0/
 ├── app/                      # Next.js App Router pages
 │   ├── layout.tsx            # Root layout with fonts and metadata
-│   ├── page.tsx              # Home page (currently default Next.js starter)
+│   ├── page.tsx              # Home page (VJ visualization)
 │   ├── globals.css           # Global styles + Tailwind config
 │   ├── favicon.ico           # App favicon
 │   └── vj/                   # VJ visualization route
@@ -53,7 +53,8 @@ vj0/
 │   └── stories/              # User stories and feature specs
 │       ├── 001_init.md       # Initial story: audio waveform visualization
 │       ├── 002_audio_worklet.md # AudioWorklet-based audio features bus
-│       └── 003_scenes.md     # Scene system: VjScene + VisualEngine
+│       ├── 003_scenes.md     # Scene system: VjScene + VisualEngine
+│       └── 004_lighting_dmx.md # Lighting system: DMX + fixtures + WebUSB
 │
 ├── public/                   # Static assets
 │   ├── *.svg                 # Various icons (Next.js defaults)
@@ -64,12 +65,20 @@ vj0/
 │   └── lib/                  # Framework-agnostic modules
 │       ├── audio-engine.ts   # Web Audio API + AudioWorklet abstraction
 │       ├── audio-features.ts # AudioFeatures type definition
-│       └── scenes/           # Scene system
-│           ├── types.ts      # VjScene interface
-│           ├── visual-engine.ts # Scene manager + render loop
-│           ├── waveform-scene.ts # Waveform visualization
-│           ├── spectrum-bars-scene.ts # Spectrum analyzer bars
-│           └── index.ts      # Scene registry + exports
+│       ├── scenes/           # Scene system
+│       │   ├── types.ts      # VjScene interface
+│       │   ├── visual-engine.ts # Scene manager + render loop
+│       │   ├── waveform-scene.ts # Waveform visualization
+│       │   ├── spectrum-bars-scene.ts # Spectrum analyzer bars
+│       │   └── index.ts      # Scene registry + exports
+│       └── lighting/         # DMX lighting system
+│           ├── types.ts      # DmxUniverse, FixtureProfile, FixtureInstance
+│           ├── lighting-engine.ts # Canvas sampling + universe building
+│           ├── dmx-output.ts # WebUSB DMX512 controller
+│           ├── fixtures/     # Fixture profiles
+│           │   ├── fun-gen-separ-quad.ts # Fun Generation SePar Quad profile
+│           │   └── index.ts  # FIXTURES array + exports
+│           └── index.ts      # Lighting module exports
 │
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
@@ -109,14 +118,24 @@ vj0/
 │  │  │ → AudioFeatures │    │   - SpectrumBarsScene   │         ││
 │  │  └─────────────────┘    │   - (extensible)        │         ││
 │  │                         └─────────────────────────┘         ││
+│  │                                     │ canvas pixels          ││
+│  │  ┌──────────────────────────────────▼───────────────────┐   ││
+│  │  │              Lighting System                          │   ││
+│  │  │  ┌─────────────────┐    ┌─────────────────────────┐  │   ││
+│  │  │  │ LightingEngine  │    │   DmxOutput             │  │   ││
+│  │  │  │ - Canvas sample │───▶│   - WebUSB DMX512       │  │   ││
+│  │  │  │ - Fixture map   │    │   - Arduino Leonardo    │  │   ││
+│  │  │  │ - DMX universe  │    │   - 512 channels        │  │   ││
+│  │  │  └─────────────────┘    └─────────────────────────┘  │   ││
+│  │  └──────────────────────────────────────────────────────┘   ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
                               │
                     Future Extensions
                               ▼
         ┌─────────────┬───────────────┬─────────────┐
-        │  AI Module  │  DMX Module   │  WebGPU     │
-        │  (cloud GPU)│  (WebUSB)     │  Scenes     │
+        │  AI Module  │  Multi-Univ   │  WebGPU     │
+        │  (cloud GPU)│  Art-Net/sACN │  Scenes     │
         └─────────────┴───────────────┴─────────────┘
 ```
 
@@ -177,6 +196,38 @@ vj0/
 - First scene is default
 - Adding scenes: implement `VjScene`, add instance to array
 - **Design**: Simple, no dynamic loading; future: lazy loading for heavy scenes
+
+#### LightingEngine (`lighting/lighting-engine.ts`)
+
+- Pure TypeScript class (no React dependency)
+- Samples pixels from the main canvas at a configurable tick rate (default 30 Hz)
+- Maps sampled colors to DMX channels via fixture profiles
+- Runs on `setInterval`, decoupled from the 60 fps visual render loop
+- API:
+  - `constructor(canvas, fixtures, config)` – Setup with canvas, fixture array, and tick config
+  - `start()` / `stop()` – Control lighting update loop
+  - `onFrame(callback)` / `offFrame(callback)` – Subscribe to `LightingFrame` emissions
+  - `getUniverse()` – Get current `DmxUniverse` buffer
+  - `updateFixtureAddress(id, address)` – Runtime address change for fixtures
+- **Design**: Reuses `Uint8Array(512)` universe buffer, no allocations per tick
+
+#### DmxOutput (`lighting/dmx-output.ts`)
+
+- WebUSB wrapper for DMX512 controllers (Arduino Leonardo-based)
+- Handles device picker, connection, and data transmission
+- API:
+  - `connect()` / `disconnect()` – Manage WebUSB device lifecycle
+  - `isConnected()` – Check connection status
+  - `sendUniverse(universe)` – Send 512-byte DMX frame
+- Sends blackout (all zeros) on disconnect
+- Graceful fallback when WebUSB is not supported
+
+#### Fixture System (`lighting/fixtures/`)
+
+- `FixtureProfile`: Defines fixture type, mode, and channel layout (R, G, B, UV, dimmer, strobe, etc.)
+- `FixtureInstance`: Concrete fixture with profile, DMX address, and canvas mapping coordinates
+- `FIXTURES` array: Current rig configuration with one SePar Quad LED fixture
+- **Extensibility**: Add new profiles and instances without modifying engine code
 
 ### Design Principles
 
@@ -266,9 +317,10 @@ User stories follow a structured format:
 1. **SharedArrayBuffer**: Replace MessagePort in `audio-engine.ts` for zero-copy audio features
 2. **WebGL/WebGPU Scenes**: Create new `VjScene` implementations using WebGL/WebGPU instead of Canvas 2D
 3. **Scene Transitions**: Add transition effects in `VisualEngine` when switching scenes
-4. **DMX Module**: Consume AudioFeatures for light control
-5. **AI Module**: Process canvas frames
-6. **Beat Detection**: Add `beat`/`tempo` to AudioFeatures in worklet
+4. **AI Module**: Process canvas frames for cloud-based image-to-image generation
+5. **Beat Detection**: Add `beat`/`tempo` to AudioFeatures in worklet
+6. **Multi-Universe DMX**: Extend lighting system to support Art-Net, sACN, or multiple USB universes
+7. **Advanced Fixture Mapping**: Add multiple sample points per fixture, 2D matrix support, effects
 
 ### Browser Compatibility
 
@@ -276,6 +328,7 @@ User stories follow a structured format:
 - `getUserMedia` requires HTTPS in production
 - WebGPU support is experimental (future consideration)
 - SharedArrayBuffer requires Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy headers
+- WebUSB for DMX requires Chrome/Edge (not supported in Firefox/Safari); graceful fallback provided
 
 ---
 
@@ -285,6 +338,8 @@ User stories follow a structured format:
 - [Web Audio API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Audio_API)
 - [AudioWorklet](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorklet)
 - [AudioWorkletProcessor](https://developer.mozilla.org/en-US/docs/Web/API/AudioWorkletProcessor)
+- [WebUSB API](https://developer.mozilla.org/en-US/docs/Web/API/USB)
+- [webusb-dmx512-controller](https://github.com/NERDDISCO/webusb-dmx512-controller) – Arduino-based DMX512 controller
 - [modV](https://github.com/vcync/modv) – Related VJ project by the same author
 - [Canvas API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API)
 
