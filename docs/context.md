@@ -22,12 +22,13 @@
 | UI Library      | React                | 19.2.0               |
 | Language        | TypeScript           | ^5                   |
 | Styling         | Tailwind CSS         | ^4                   |
+| State (UI only) | Zustand              | ^5                   |
 | Linting         | ESLint               | ^9                   |
 | Package Manager | npm                  | (npm-based lockfile) |
 
 ### Key Technical Decisions
 
-- **No heavy client-side state management** – Avoid libraries like Redux/Zustand for audio/rendering logic
+- **Minimal client-side state for hot paths** – Use Zustand only for UI settings/persistence, never for audio buffers or render loop state
 - **Framework-agnostic core modules** – Audio and rendering logic lives in pure TypeScript classes, not React hooks
 - **Modern browser APIs** – Web Audio API, Canvas 2D (upgradeable to WebGL/WebGPU), AudioWorklet for real-time analysis
 - **Performance-first design** – Zero allocations in render loops, no React state for audio buffers
@@ -71,14 +72,18 @@ vj0/
 │       │   ├── waveform-scene.ts # Waveform visualization
 │       │   ├── spectrum-bars-scene.ts # Spectrum analyzer bars
 │       │   └── index.ts      # Scene registry + exports
-│       └── lighting/         # DMX lighting system
-│           ├── types.ts      # DmxUniverse, FixtureProfile, FixtureInstance
-│           ├── lighting-engine.ts # Canvas sampling + universe building
-│           ├── dmx-output.ts # WebUSB DMX512 controller
-│           ├── fixtures/     # Fixture profiles
-│           │   ├── fun-gen-separ-quad.ts # Fun Generation SePar Quad profile
-│           │   └── index.ts  # FIXTURES array + exports
-│           └── index.ts      # Lighting module exports
+│       ├── lighting/         # DMX lighting system
+│       │   ├── types.ts      # DmxUniverse, FixtureProfile, FixtureInstance
+│       │   ├── lighting-engine.ts # Canvas sampling + universe building
+│       │   ├── dmx-output.ts # WebUSB DMX512 controller
+│       │   ├── fixtures/     # Fixture profiles
+│       │   │   ├── fun-gen-separ-quad.ts # Fun Generation SePar Quad profile
+│       │   │   ├── stairville-wild-wash-pro.ts # Stairville Wild Wash Pro 648
+│       │   │   └── index.ts  # FIXTURE_PROFILES array + exports
+│       │   └── index.ts      # Lighting module exports
+│       └── stores/           # Zustand stores (UI state only)
+│           ├── lighting-store.ts # Fixture settings with localStorage persistence
+│           └── index.ts      # Store exports
 │
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
@@ -226,8 +231,16 @@ vj0/
 
 - `FixtureProfile`: Defines fixture type, mode, and channel layout (R, G, B, UV, dimmer, strobe, etc.)
 - `FixtureInstance`: Concrete fixture with profile, DMX address, and canvas mapping coordinates
-- `FIXTURES` array: Current rig configuration with one SePar Quad LED fixture
+- `FIXTURE_PROFILES` array: Available profiles (SePar Quad, Stairville Wild Wash Pro 648)
+- User fixtures managed via Zustand store with localStorage persistence
 - **Extensibility**: Add new profiles and instances without modifying engine code
+
+#### Lighting Store (`stores/lighting-store.ts`)
+
+- Zustand store for fixture configuration
+- Persisted to localStorage for session persistence
+- Serializes fixtures (stores profile ID, not full profile object)
+- Actions for add/remove/update fixtures and their settings
 
 ### Design Principles
 
