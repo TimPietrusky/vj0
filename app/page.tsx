@@ -1,7 +1,7 @@
-import { VJWaveform } from "./vj/VJWaveform";
+import { VJApp } from "./vj/VJApp";
 
 export const metadata = {
-  title: "vj0 - Live Audio Waveform",
+  title: "vj0 - Live Audio Visualization",
   description: "Real-time audio visualization for live visual artists",
 };
 
@@ -13,7 +13,7 @@ export default function Home() {
           vj0
         </h1>
       </header>
-      <VJWaveform />
+      <VJApp />
     </main>
   );
 }

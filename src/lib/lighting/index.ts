@@ -17,4 +17,5 @@ export type {
   FixtureInstance,
   StrobeMode,
   ColorMode,
+  StrobeRange,
 } from "./types";

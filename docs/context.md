@@ -47,7 +47,16 @@ vj0/
 │   ├── favicon.ico           # App favicon
 │   └── vj/                   # VJ visualization route
 │       ├── page.tsx          # VJ page (server component wrapper)
-│       └── VJWaveform.tsx    # Waveform client component + debug panel
+│       ├── VJApp.tsx         # Main VJ client orchestrator (engines, refs)
+│       └── components/       # UI components (presentational)
+│           ├── StatusBar.tsx
+│           ├── AudioDebugPanel.tsx
+│           ├── LightingPanel.tsx
+│           ├── DmxControls.tsx
+│           ├── FixtureSelector.tsx
+│           ├── FixtureInspector.tsx
+│           ├── FeatureBar.tsx
+│           └── index.ts
 │
 ├── docs/                     # Documentation
 │   ├── context.md            # This file – project context for contributors
@@ -104,7 +113,7 @@ vj0/
 │                        Next.js App (React)                       │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │                    React Components                          ││
-│  │  - VJWaveform (canvas + status + scene selector + debug)    ││
+│  │  - VJApp (orchestrator) + StatusBar, LightingPanel, etc.   ││
 │  │  - Device selector (audio input dropdown)                   ││
 │  └───────────────────────┬─────────────────────────────────────┘│
 │                          │ uses (no React state for buffers)    │
