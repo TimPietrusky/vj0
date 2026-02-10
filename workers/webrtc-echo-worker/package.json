@@ -1,0 +1,19 @@
+{
+  "name": "vj0-webrtc-echo-worker",
+  "private": true,
+  "version": "0.0.1",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "node-pre-gyp": "^0.17.0",
+    "wrtc": "^0.4.7"
+  }
+}
+

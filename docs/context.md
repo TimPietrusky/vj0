@@ -64,7 +64,8 @@ vj0/
 │       ├── 001_init.md       # Initial story: audio waveform visualization
 │       ├── 002_audio_worklet.md # AudioWorklet-based audio features bus
 │       ├── 003_scenes.md     # Scene system: VjScene + VisualEngine
-│       └── 004_lighting_dmx.md # Lighting system: DMX + fixtures + WebUSB
+│       ├── 004_lighting_dmx.md # Lighting system: DMX + fixtures + WebUSB
+│       └── 005_webrtc_poc.md # Remote WebRTC PoC to GPU worker (transport only)
 │
 ├── public/                   # Static assets
 │   ├── *.svg                 # Various icons (Next.js defaults)
@@ -73,6 +74,9 @@ vj0/
 │
 ├── src/                      # Source code
 │   └── lib/                  # Framework-agnostic modules
+│       ├── ai/               # Remote AI transports (browser-side)
+│       │   ├── transport.ts  # AiTransport interface + shared types
+│       │   └── webrtc-transport.ts # WebRTC data-channel transport (PoC)
 │       ├── audio-engine.ts   # Web Audio API + AudioWorklet abstraction
 │       ├── audio-features.ts # AudioFeatures type definition
 │       ├── scenes/           # Scene system
@@ -93,6 +97,9 @@ vj0/
 │       └── stores/           # Zustand stores (UI state only)
 │           ├── lighting-store.ts # Fixture settings with localStorage persistence
 │           └── index.ts      # Store exports
+│
+├── workers/                  # Standalone services (deployed separately)
+│   └── webrtc-echo-worker/   # Remote WebRTC echo worker (RunPod Docker image)
 │
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
@@ -340,6 +347,8 @@ User stories follow a structured format:
 2. **WebGL/WebGPU Scenes**: Create new `VjScene` implementations using WebGL/WebGPU instead of Canvas 2D
 3. **Scene Transitions**: Add transition effects in `VisualEngine` when switching scenes
 4. **AI Module**: Process canvas frames for cloud-based image-to-image generation
+   - Browser-side transport abstraction lives under `src/lib/ai/` (currently WebRTC data channel PoC)
+   - Remote workers are standalone deployables under `workers/` (Docker images for GPU hosts like RunPod)
 5. **Beat Detection**: Add `beat`/`tempo` to AudioFeatures in worklet
 6. **Multi-Universe DMX**: Extend lighting system to support Art-Net, sACN, or multiple USB universes
 7. **Advanced Fixture Mapping**: Add multiple sample points per fixture, 2D matrix support, effects
