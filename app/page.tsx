@@ -1,18 +1,13 @@
 import { VJApp } from "./vj/VJApp";
 
 export const metadata = {
-  title: "vj0 - Live Audio Visualization",
+  title: "vj0 — live audio-reactive visuals",
   description: "Real-time audio visualization for live visual artists",
 };
 
 export default function Home() {
   return (
-    <main className="min-h-screen bg-black flex flex-col items-center justify-center">
-      <header className="py-8">
-        <h1 className="text-3xl font-mono font-bold tracking-tight text-emerald-400">
-          vj0
-        </h1>
-      </header>
+    <main className="min-h-screen w-screen bg-[#0a0a0f] text-neutral-200">
       <VJApp />
     </main>
   );

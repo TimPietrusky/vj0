@@ -1,8 +1,23 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a0a0f;
+  --foreground: #ededed;
+
+  /* vj0 neon palette — bright, saturated, stage-ready */
+  --vj-bg: #0a0a0f;
+  --vj-panel: #0f0f16;
+  --vj-panel-2: #14141d;
+  --vj-edge: #22222e;
+  --vj-edge-hot: #2d2d3d;
+  --vj-ink: #e9e9f2;
+  --vj-ink-dim: #8a8aa0;
+  --vj-live: #00ff88;      /* bright emerald — running / connected / success */
+  --vj-info: #00e5ff;      /* electric cyan — idle / connecting / info */
+  --vj-accent: #ff00aa;    /* hot magenta — primary action, selected */
+  --vj-warn: #ffd700;      /* bright yellow — unsaved / warning */
+  --vj-error: #ff3355;     /* bright red — error */
+  --vj-muted: #3a3a4a;     /* only for disabled */
 }
 
 @theme inline {
@@ -10,17 +25,309 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --color-vj-bg: var(--vj-bg);
+  --color-vj-panel: var(--vj-panel);
+  --color-vj-panel-2: var(--vj-panel-2);
+  --color-vj-edge: var(--vj-edge);
+  --color-vj-edge-hot: var(--vj-edge-hot);
+  --color-vj-ink: var(--vj-ink);
+  --color-vj-ink-dim: var(--vj-ink-dim);
+  --color-vj-live: var(--vj-live);
+  --color-vj-info: var(--vj-info);
+  --color-vj-accent: var(--vj-accent);
+  --color-vj-warn: var(--vj-warn);
+  --color-vj-error: var(--vj-error);
+  --color-vj-muted: var(--vj-muted);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html,
+body {
+  background: var(--vj-bg);
+  color: var(--vj-ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, "Cascadia Code",
+    "Source Code Pro", monospace;
+  font-feature-settings: "ss01", "cv03", "cv04";
+}
+
+/* Subtle grid texture so the dark bg doesn't look flat under projector light */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--vj-edge) 40%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--vj-edge) 40%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse at top, black 20%, transparent 80%);
+  opacity: 0.35;
+}
+
+/* Pulsing status dot — use on any .vj-dot with a color var */
+@keyframes vj-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 currentColor, 0 0 6px 0 currentColor;
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 0%, transparent),
+      0 0 12px 2px currentColor;
+    opacity: 0.85;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.vj-dot {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: vj-pulse 1.6s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+.vj-dot--static {
+  animation: none;
+  box-shadow: 0 0 6px 0 currentColor;
+}
+
+/* Scrollbar — thin, neon */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--vj-edge-hot);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--vj-info);
+}
+
+/* Inputs — bright focus ring using the accent magenta */
+.vj-input {
+  background: #05050a;
+  border: 1px solid var(--vj-edge);
+  color: var(--vj-ink);
+  border-radius: 4px;
+  padding: 0.375rem 0.625rem;
+  font-family: inherit;
+  font-size: 0.75rem;
+  line-height: 1rem;
+  transition: border-color 120ms, box-shadow 120ms, background 120ms;
+}
+.vj-input:hover {
+  border-color: var(--vj-edge-hot);
+}
+.vj-input:focus {
+  outline: none;
+  border-color: var(--vj-accent);
+  box-shadow: 0 0 0 1px var(--vj-accent), 0 0 14px -2px var(--vj-accent);
+  background: #0b0b13;
+}
+
+/* Small button base */
+.vj-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  border: 1px solid var(--vj-edge);
+  background: var(--vj-panel-2);
+  color: var(--vj-ink);
+  padding: 0.3rem 0.625rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-weight: 500;
+  transition: all 120ms;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vj-btn:hover:not(:disabled) {
+  border-color: var(--vj-info);
+  color: var(--vj-info);
+  background: #0a1418;
+}
+.vj-btn:disabled {
+  color: var(--vj-muted);
+  border-color: var(--vj-edge);
+  cursor: not-allowed;
+}
+.vj-btn--live {
+  border-color: var(--vj-live);
+  color: var(--vj-live);
+  background: color-mix(in srgb, var(--vj-live) 8%, transparent);
+}
+.vj-btn--live:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vj-live) 18%, transparent);
+  color: var(--vj-live);
+  border-color: var(--vj-live);
+  box-shadow: 0 0 16px -4px var(--vj-live);
+}
+.vj-btn--accent {
+  border-color: var(--vj-accent);
+  color: var(--vj-accent);
+  background: color-mix(in srgb, var(--vj-accent) 8%, transparent);
+}
+.vj-btn--accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vj-accent) 22%, transparent);
+  color: #fff;
+  box-shadow: 0 0 18px -4px var(--vj-accent);
+}
+.vj-btn--danger {
+  border-color: var(--vj-error);
+  color: var(--vj-error);
+  background: color-mix(in srgb, var(--vj-error) 8%, transparent);
+}
+.vj-btn--danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vj-error) 22%, transparent);
+  color: #fff;
+  box-shadow: 0 0 18px -4px var(--vj-error);
+}
+
+/* Panel — used for each dashboard card */
+.vj-panel {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--vj-panel) 96%, transparent),
+    var(--vj-panel)
+  );
+  border: 1px solid var(--vj-edge);
+  border-radius: 6px;
+  position: relative;
+}
+.vj-panel::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 10%;
+  right: 10%;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--vj-edge-hot),
+    transparent
+  );
+  pointer-events: none;
+}
+
+.vj-panel-title {
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--vj-ink-dim);
+  font-weight: 600;
+}
+
+/* Checkbox — bright magenta when checked */
+.vj-check {
+  appearance: none;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 1px solid var(--vj-edge-hot);
+  border-radius: 2px;
+  background: #05050a;
+  cursor: pointer;
+  position: relative;
+  transition: all 120ms;
+  flex-shrink: 0;
+}
+.vj-check:hover {
+  border-color: var(--vj-info);
+}
+.vj-check:checked {
+  background: var(--vj-live);
+  border-color: var(--vj-live);
+  box-shadow: 0 0 8px -1px var(--vj-live);
+}
+.vj-check:checked::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: #03150b;
+  clip-path: polygon(14% 44%, 0% 65%, 40% 100%, 100% 16%, 80% 0%, 43% 62%);
+}
+
+/* Range slider — magenta accent */
+input[type="range"].vj-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: linear-gradient(
+    to right,
+    var(--vj-accent) var(--vj-range-fill, 0%),
+    var(--vj-edge) var(--vj-range-fill, 0%)
+  );
+  border-radius: 2px;
+  cursor: pointer;
+}
+input[type="range"].vj-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--vj-accent);
+  box-shadow: 0 0 8px var(--vj-accent);
+  border: 0;
+  cursor: grab;
+}
+input[type="range"].vj-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--vj-accent);
+  box-shadow: 0 0 8px var(--vj-accent);
+  border: 0;
+  cursor: grab;
+}
+
+/* Canvas wrappers */
+.vj-canvas-frame {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--vj-edge-hot);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.vj-canvas-frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      ellipse at center,
+      transparent 60%,
+      color-mix(in srgb, #000 30%, transparent) 100%
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0px,
+      transparent 2px,
+      color-mix(in srgb, #000 12%, transparent) 3px,
+      transparent 4px
+    );
+}
+
+/* Make app sit above the body grid overlay */
+main {
+  position: relative;
+  z-index: 1;
 }

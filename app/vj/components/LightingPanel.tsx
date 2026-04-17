@@ -60,11 +60,7 @@ export function LightingPanel({
   onFixtureRemove,
 }: LightingPanelProps) {
   return (
-    <div className="bg-neutral-900/80 border border-neutral-700 rounded-lg p-4 font-mono text-xs">
-      <div className="text-neutral-400 uppercase tracking-wide mb-3">
-        Lighting / DMX
-      </div>
-
+    <div className="font-mono text-xs flex flex-col gap-3">
       <DmxControls
         status={dmxStatus}
         supported={dmxSupported}

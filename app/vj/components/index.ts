@@ -5,3 +5,7 @@ export { FixtureSelector } from "./FixtureSelector";
 export { LightingPanel } from "./LightingPanel";
 export { AudioDebugPanel } from "./AudioDebugPanel";
 export { StatusBar } from "./StatusBar";
+export { SystemsBar } from "./SystemsBar";
+export { PresetChips } from "./PresetChips";
+export { PromptDock } from "./PromptDock";
+export { Field } from "./Field";
