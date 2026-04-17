@@ -16,6 +16,8 @@ import {
 import {
   AI_BACKEND_URLS,
   AI_BACKEND_LABELS,
+  OUTPUT_PRESETS,
+  findOutputPreset,
   type AiBackend,
   type UpscaleMode,
 } from "@/src/lib/stores/ai-settings-store";
@@ -106,6 +108,17 @@ export function VJApp() {
     };
   }, [aiTransport]);
 
+  // Auto-connect on app load (and on backend switch), if the user enabled it.
+  // Selector avoids needing the full store destructure to be evaluated first.
+  const aiAutoConnectSel = useAiSettingsStore((s) => s.autoConnect);
+  useEffect(() => {
+    if (!aiAutoConnectSel) return;
+    const t = window.setTimeout(() => {
+      if (!aiTransport.isConnected()) void aiTransport.start();
+    }, 120);
+    return () => window.clearTimeout(t);
+  }, [aiAutoConnectSel, aiTransport]);
+
   // UI state - safe to use useState for these
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
@@ -127,13 +140,15 @@ export function VJApp() {
     showCaptureDebug: aiShowCaptureDebug,
     prompt: aiPrompt,
     captureSize: aiCaptureSize,
-    outputSize: aiOutputSize,
+    outputWidth: aiOutputWidth,
+    outputHeight: aiOutputHeight,
     frameRate: aiFrameRate,
     seed: aiSeed,
     kleinAlpha: aiKleinAlpha,
     kleinSteps: aiKleinSteps,
     upscaleMode: aiUpscaleMode,
     hideUi: aiHideUi,
+    autoConnect: aiAutoConnect,
     promptPresets: aiPromptPresets,
     setBackend: setAiBackend,
     setShowAi,
@@ -148,7 +163,11 @@ export function VJApp() {
     setKleinSteps: setAiKleinSteps,
     setUpscaleMode: setAiUpscaleMode,
     setHideUi: setAiHideUi,
+    setAutoConnect: setAiAutoConnect,
   } = useAiSettingsStore();
+
+  // The larger side drives aspect-aware capture math below.
+  const aiOutputLong = Math.max(aiOutputWidth, aiOutputHeight);
 
   // Prompt draft — user types freely; Enter commits to the store (and server).
   // This avoids pushing a new prompt on every keystroke during live performance.
@@ -208,7 +227,7 @@ export function VJApp() {
         const idx = parseInt(e.key, 10) - 1;
         const preset = aiPromptPresets[idx];
         if (preset) {
-          setAiPrompt(preset);
+          setAiPrompt(preset.prompt);
           e.preventDefault();
         }
         return;
@@ -543,8 +562,8 @@ export function VJApp() {
           stageChannelRef.current?.postMessage({
             type: "frame",
             bytes: buf,
-            width: aiOutputSize,
-            height: aiOutputSize,
+            width: aiOutputWidth,
+            height: aiOutputHeight,
             seq: ++stageFrameSeqRef.current,
           });
         })
@@ -558,7 +577,7 @@ export function VJApp() {
       aiTransport.offFrame(handleFrame);
       aiTransport.offStatusChange(handleStatus);
     };
-  }, [aiTransport, aiOutputSize]);
+  }, [aiTransport, aiOutputWidth, aiOutputHeight]);
 
   // Revoke object URL on unmount
   useEffect(() => {
@@ -613,14 +632,21 @@ export function VJApp() {
       return;
     }
 
-    // Lazy init or resize capture canvas
-    if (!sender.captureCanvas || sender.resolution !== aiCaptureSize) {
+    // Capture dimensions follow output aspect. Capture canvas is sized so
+    // its LONGER side equals aiCaptureSize; the shorter side is derived
+    // from the output aspect ratio. No more forced-square capture.
+    const outAspect = aiOutputWidth / aiOutputHeight;
+    const capW =
+      outAspect >= 1 ? aiCaptureSize : Math.max(16, Math.round(aiCaptureSize * outAspect));
+    const capH =
+      outAspect >= 1 ? Math.max(16, Math.round(aiCaptureSize / outAspect)) : aiCaptureSize;
+    const resolutionKey = capW * 10000 + capH;
+    if (!sender.captureCanvas || sender.resolution !== resolutionKey) {
       sender.captureCanvas = document.createElement("canvas");
-      sender.captureCanvas.width = aiCaptureSize;
-      sender.captureCanvas.height = aiCaptureSize;
-      // willReadFrequently no longer needed — we use toBlob (GPU path) instead of getImageData
+      sender.captureCanvas.width = capW;
+      sender.captureCanvas.height = capH;
       sender.captureCtx = sender.captureCanvas.getContext("2d");
-      sender.resolution = aiCaptureSize;
+      sender.resolution = resolutionKey;
     }
 
     const ctx = sender.captureCtx;
@@ -628,15 +654,21 @@ export function VJApp() {
       return;
     }
 
-    // Crop center square from source
-    const srcSize = Math.min(src.width, src.height);
-    const srcX = (src.width - srcSize) / 2;
-    const srcY = (src.height - srcSize) / 2;
+    // Center-crop source to match target aspect so we don't stretch.
+    let srcCropW = src.width;
+    let srcCropH = src.height;
+    if (src.width / src.height > outAspect) {
+      srcCropW = src.height * outAspect;
+    } else {
+      srcCropH = src.width / outAspect;
+    }
+    const srcX = (src.width - srcCropW) / 2;
+    const srcY = (src.height - srcCropH) / 2;
 
     ctx.drawImage(
       src,
-      srcX, srcY, srcSize, srcSize,
-      0, 0, aiCaptureSize, aiCaptureSize
+      srcX, srcY, srcCropW, srcCropH,
+      0, 0, capW, capH
     );
 
     sender.lastFrameTime = now;
@@ -645,9 +677,9 @@ export function VJApp() {
     // Always paint debug canvas so the preview works without a connection.
     const debugCanvas = aiDebugCanvasRef.current;
     if (debugCanvas) {
-      if (!sender.debugCtx || debugCanvas.width !== aiCaptureSize) {
-        debugCanvas.width = aiCaptureSize;
-        debugCanvas.height = aiCaptureSize;
+      if (!sender.debugCtx || debugCanvas.width !== capW || debugCanvas.height !== capH) {
+        debugCanvas.width = capW;
+        debugCanvas.height = capH;
         sender.debugCtx = debugCanvas.getContext("2d");
       }
       sender.debugCtx?.drawImage(sender.captureCanvas, 0, 0);
@@ -685,7 +717,7 @@ export function VJApp() {
       "image/jpeg",
       0.85
     );
-  }, [aiTransport, aiCaptureSize, aiFrameRate]);
+  }, [aiTransport, aiCaptureSize, aiFrameRate, aiOutputWidth, aiOutputHeight]);
 
   // Send prompt/settings to AI when they change
   useEffect(() => {
@@ -707,13 +739,21 @@ export function VJApp() {
       requestAnimationFrame(aiFrameLoop);
     }, 100); // Resume after settings are pushed to server.
 
+    // Capture dimensions follow output aspect so the waveform isn't
+    // double-resampled by the server. captureSize controls the LONGER side;
+    // the shorter is derived from the output aspect.
+    const aspect = aiOutputWidth / aiOutputHeight;
+    const captureW =
+      aspect >= 1 ? aiCaptureSize : Math.max(16, Math.round(aiCaptureSize * aspect));
+    const captureH =
+      aspect >= 1 ? Math.max(16, Math.round(aiCaptureSize / aspect)) : aiCaptureSize;
     const payload: Record<string, unknown> = {
       prompt: aiPrompt,
       seed: aiSeed,
-      captureWidth: aiCaptureSize,
-      captureHeight: aiCaptureSize,
-      width: aiOutputSize,
-      height: aiOutputSize,
+      captureWidth: captureW,
+      captureHeight: captureH,
+      width: aiOutputWidth,
+      height: aiOutputHeight,
     };
     if (aiBackend === "klein") {
       payload.alpha = aiKleinAlpha;
@@ -725,7 +765,8 @@ export function VJApp() {
     aiPrompt,
     aiSeed,
     aiCaptureSize,
-    aiOutputSize,
+    aiOutputWidth,
+    aiOutputHeight,
     aiKleinAlpha,
     aiKleinSteps,
     aiTransport,
@@ -988,6 +1029,18 @@ export function VJApp() {
               >
                 Disconnect
               </button>
+              <label
+                className="flex items-center gap-2 text-xs font-mono text-neutral-400"
+                title="Automatically connect to the selected backend on page load and on backend switch."
+              >
+                <input
+                  type="checkbox"
+                  checked={aiAutoConnect}
+                  onChange={(e) => setAiAutoConnect(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+                Auto-connect
+              </label>
             </div>
           </div>
 
@@ -1030,24 +1083,24 @@ export function VJApp() {
                 Send ↵
               </button>
             </div>
-            {/* Preset chips (also bound to hotkeys 1-9) */}
+            {/* Preset chips (also bound to hotkeys 1-9). Click = fire prompt,
+                hover = show edit pencil, pencil = edit label + prompt inline. */}
             <div className="flex flex-wrap gap-1 pt-1">
               {aiPromptPresets.map((p, i) => {
-                const active = p === aiPrompt;
+                const active = p.prompt === aiPrompt;
                 return (
                   <button
                     key={i}
-                    onClick={() => setAiPrompt(p)}
-                    className={`text-[10px] font-mono px-2 py-1 rounded border transition-colors ${
+                    onClick={() => setAiPrompt(p.prompt)}
+                    className={`text-xs font-mono px-2 py-1 rounded border transition-colors ${
                       active
                         ? "border-emerald-700 bg-emerald-950/40 text-emerald-300"
                         : "border-neutral-800 text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/60"
                     }`}
-                    title={p}
+                    title={p.prompt}
                   >
                     <span className="opacity-50 mr-1">{i + 1}</span>
-                    {p.slice(0, 32)}
-                    {p.length > 32 ? "…" : ""}
+                    {p.label}
                   </button>
                 );
               })}
@@ -1085,13 +1138,13 @@ export function VJApp() {
                 <option value={256}>256</option>
                 <option value={512}>512</option>
               </select>
-              {aiBackend === "klein" && aiCaptureSize !== aiOutputSize && (
+              {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
                 <button
-                  onClick={() => setAiCaptureSize(aiOutputSize)}
+                  onClick={() => setAiCaptureSize(aiOutputLong)}
                   className="px-2 py-0.5 rounded border border-amber-900 text-[10px] text-amber-400 hover:bg-amber-950/30"
-                  title={`Match capture to output (${aiOutputSize}) for sharper Klein results`}
+                  title={`Match capture to output long side (${aiOutputLong}) for sharper Klein results`}
                 >
-                  → {aiOutputSize}
+                  → {aiOutputLong}
                 </button>
               )}
             </label>
@@ -1099,14 +1152,21 @@ export function VJApp() {
             <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
               Output:
               <select
-                value={aiOutputSize}
-                onChange={(e) => setAiOutputSize(Number(e.target.value))}
+                value={
+                  findOutputPreset(aiOutputWidth, aiOutputHeight)?.id ??
+                  `${aiOutputWidth}x${aiOutputHeight}`
+                }
+                onChange={(e) => {
+                  const preset = OUTPUT_PRESETS.find((p) => p.id === e.target.value);
+                  if (preset) setAiOutputSize(preset.w, preset.h);
+                }}
                 className="bg-black/50 border border-neutral-800 rounded px-2 py-1 text-neutral-200"
               >
-                <option value={256}>256x256</option>
-                <option value={512}>512x512</option>
-                <option value={768}>768x768</option>
-                <option value={1024}>1024x1024</option>
+                {OUTPUT_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
               </select>
             </label>
 
@@ -1227,7 +1287,7 @@ export function VJApp() {
           {aiShowCaptureDebug && (
             <div className="inline-flex flex-col gap-1 rounded border border-neutral-800 bg-black/30 p-2 self-start">
               <div className="text-xs font-mono text-neutral-500">
-                Sending to AI ({aiCaptureSize}x{aiCaptureSize} → {aiOutputSize}x{aiOutputSize})
+                Sending to AI ({aiCaptureSize} long side → {aiOutputWidth}×{aiOutputHeight})
               </div>
               <canvas
                 ref={aiDebugCanvasRef}

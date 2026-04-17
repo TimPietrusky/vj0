@@ -17,18 +17,50 @@ export const AI_BACKEND_LABELS: Record<AiBackend, string> = {
 
 export type UpscaleMode = "bilinear" | "lanczos";
 
+// Prompt preset: a short label (shown on hotkey chips 1-9) and the full prompt
+// text sent to the AI. Label is kept terse so the chip stays compact.
+export type PromptPreset = {
+  label: string;
+  prompt: string;
+};
+
+// Output resolution presets for the AI generator. FLUX.2 requires both
+// dimensions divisible by 16 — the 16:9 entries below respect that
+// (256×144, 512×288, 768×432, 1024×576 are the clean 16:9 sizes that also
+// divide by 16). Projector-friendly widescreen is the 16:9 column.
+export type OutputPreset = {
+  id: string;
+  label: string;
+  w: number;
+  h: number;
+};
+
+export const OUTPUT_PRESETS: OutputPreset[] = [
+  { id: "256x144",  w: 256,  h: 144, label: "256×144 · 16:9 · fast (projector)" },
+  { id: "256x256",  w: 256,  h: 256, label: "256×256 · 1:1 · fast" },
+  { id: "384x384",  w: 384,  h: 384, label: "384×384 · 1:1 · balanced" },
+  { id: "512x288",  w: 512,  h: 288, label: "512×288 · 16:9 · quality (projector)" },
+  { id: "512x512",  w: 512,  h: 512, label: "512×512 · 1:1 · quality" },
+  { id: "768x432",  w: 768,  h: 432, label: "768×432 · 16:9 · premium" },
+  { id: "1024x576", w: 1024, h: 576, label: "1024×576 · 16:9 · cinema" },
+];
+
+export function findOutputPreset(w: number, h: number): OutputPreset | undefined {
+  return OUTPUT_PRESETS.find((p) => p.w === w && p.h === h);
+}
+
 // Default 1-9 preset prompts, bound to number-key hotkeys in the VJ app.
-// Edit here and they'll update in the control panel.
-export const DEFAULT_PROMPT_PRESETS: string[] = [
-  "vibrant neon cyberpunk city street at night, rain, reflections, wide angle",
-  "aurora borealis over snowy mountains, green and purple sky, long exposure",
-  "spiral galaxy with pink and blue nebula, dust clouds, deep space, astrophotography",
-  "underwater caustics, sun rays piercing blue water, silhouettes of fish, dreamy",
-  "black ink dropping into water, slow motion, white background, macro photography",
-  "flames dancing in the dark, high speed photograph, black background",
-  "forest floor after rain, golden hour, moss and fungi, macro photograph",
-  "abstract oil paint swirling in water, vibrant colors, macro",
-  "bioluminescent jellyfish in deep ocean, dark blue background, ethereal, cinematic",
+// `label` shows on the hotkey chip; `prompt` is what's sent to the model.
+export const DEFAULT_PROMPT_PRESETS: PromptPreset[] = [
+  { label: "Cyber",  prompt: "vibrant neon cyberpunk city street at night, rain, reflections, wide angle" },
+  { label: "Aurora", prompt: "aurora borealis over snowy mountains, green and purple sky, long exposure" },
+  { label: "Galaxy", prompt: "spiral galaxy with pink and blue nebula, dust clouds, deep space, astrophotography" },
+  { label: "Ocean",  prompt: "underwater caustics, sun rays piercing blue water, silhouettes of fish, dreamy" },
+  { label: "Ink",    prompt: "black ink dropping into water, slow motion, white background, macro photography" },
+  { label: "Fire",   prompt: "flames dancing in the dark, high speed photograph, black background" },
+  { label: "Forest", prompt: "forest floor after rain, golden hour, moss and fungi, macro photograph" },
+  { label: "Paint",  prompt: "abstract oil paint swirling in water, vibrant colors, macro" },
+  { label: "Jelly",  prompt: "bioluminescent jellyfish in deep ocean, dark blue background, ethereal, cinematic" },
 ];
 
 interface AiSettingsState {
@@ -38,7 +70,10 @@ interface AiSettingsState {
   showCaptureDebug: boolean;
   prompt: string;
   captureSize: number;
-  outputSize: number;
+  /** Output width in pixels (must be div by 16 for FLUX.2). */
+  outputWidth: number;
+  /** Output height in pixels (must be div by 16 for FLUX.2). */
+  outputHeight: number;
   frameRate: number;
   seed: number;
   // Klein-specific
@@ -47,7 +82,8 @@ interface AiSettingsState {
   // Live-performance UX
   upscaleMode: UpscaleMode;       // display-time upscale quality in the output canvas
   hideUi: boolean;                // H key: hide all panels, just show output
-  promptPresets: string[];        // bound to number keys 1-9
+  autoConnect: boolean;           // auto-connect to configured backend on app load
+  promptPresets: PromptPreset[];  // bound to number keys 1-9
 
   setBackend: (value: AiBackend) => void;
   setShowAi: (value: boolean) => void;
@@ -55,14 +91,16 @@ interface AiSettingsState {
   setShowCaptureDebug: (value: boolean) => void;
   setPrompt: (value: string) => void;
   setCaptureSize: (value: number) => void;
-  setOutputSize: (value: number) => void;
+  setOutputSize: (width: number, height?: number) => void;
   setFrameRate: (value: number) => void;
   setSeed: (value: number) => void;
   setKleinAlpha: (value: number) => void;
   setKleinSteps: (value: number) => void;
   setUpscaleMode: (value: UpscaleMode) => void;
   setHideUi: (value: boolean) => void;
-  setPromptPresets: (value: string[]) => void;
+  setAutoConnect: (value: boolean) => void;
+  setPromptPresets: (value: PromptPreset[]) => void;
+  updatePromptPreset: (index: number, preset: Partial<PromptPreset>) => void;
 }
 
 export const useAiSettingsStore = create<AiSettingsState>()(
@@ -73,14 +111,16 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       sendFrames: false,
       showCaptureDebug: false,
       prompt: "colorful abstract art, vibrant neon lights, psychedelic patterns",
-      captureSize: 128,
-      outputSize: 256,
+      captureSize: 256,
+      outputWidth: 512,
+      outputHeight: 288, // 16:9 default — projector-friendly
       frameRate: 20,
       seed: 42,
       kleinAlpha: 0.10,
       kleinSteps: 2,
       upscaleMode: "lanczos",
       hideUi: false,
+      autoConnect: false,
       promptPresets: DEFAULT_PROMPT_PRESETS.slice(),
 
       setBackend: (value) => set({ backend: value }),
@@ -90,23 +130,66 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         set({ kleinSteps: Math.max(1, Math.min(4, Math.round(value))) }),
       setUpscaleMode: (value) => set({ upscaleMode: value }),
       setHideUi: (value) => set({ hideUi: value }),
+      setAutoConnect: (value) => set({ autoConnect: value }),
       setPromptPresets: (value) => set({ promptPresets: value.slice(0, 9) }),
+      updatePromptPreset: (index, preset) =>
+        set((s) => {
+          if (index < 0 || index >= s.promptPresets.length) return s;
+          const next = s.promptPresets.slice();
+          next[index] = { ...next[index], ...preset };
+          return { promptPresets: next };
+        }),
       setShowAi: (value) => set({ showAi: value }),
       setSendFrames: (value) => set({ sendFrames: value }),
       setShowCaptureDebug: (value) => set({ showCaptureDebug: value }),
       setPrompt: (value) => set({ prompt: value }),
       setCaptureSize: (value) =>
         set({ captureSize: Math.max(64, Math.min(1024, value)) }),
-      setOutputSize: (value) =>
-        set({
-          outputSize: [256, 512, 768, 1024].includes(value) ? value : 256,
-        }),
+      setOutputSize: (width, height) => {
+        // Snap to a known preset when possible (handles legacy callers passing
+        // only a width). FLUX.2 needs dims divisible by 16 — the preset list
+        // already respects that.
+        const h = height ?? width;
+        const preset = findOutputPreset(width, h);
+        if (preset) {
+          set({ outputWidth: preset.w, outputHeight: preset.h });
+          return;
+        }
+        // Fallback: round both to the nearest multiple of 16, clamp to sane
+        // range. This keeps us valid even if a caller hands in a custom size.
+        const snap = (n: number) =>
+          Math.max(128, Math.min(1024, Math.round(n / 16) * 16));
+        set({ outputWidth: snap(width), outputHeight: snap(h) });
+      },
       setFrameRate: (value) =>
         set({ frameRate: [10, 20, 30, 60].includes(value) ? value : 20 }),
       setSeed: (value) => set({ seed: Math.max(0, Math.floor(value)) }),
     }),
     {
       name: "vj0-ai-settings-storage",
+      version: 2,
+      migrate: (persisted: unknown, version: number) => {
+        // v0/v1 had: outputSize: number, promptPresets: string[]
+        // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
+        const s = (persisted as Record<string, unknown>) || {};
+        const out: Record<string, unknown> = { ...s };
+
+        if (version < 2) {
+          const size = typeof s.outputSize === "number" ? s.outputSize : 512;
+          if (!("outputWidth" in out)) out.outputWidth = size;
+          if (!("outputHeight" in out)) out.outputHeight = size === 512 ? 288 : size;
+          delete out.outputSize;
+
+          if (Array.isArray(s.promptPresets) && typeof s.promptPresets[0] === "string") {
+            out.promptPresets = (s.promptPresets as string[]).map((p, i) => ({
+              label: DEFAULT_PROMPT_PRESETS[i]?.label ?? `P${i + 1}`,
+              prompt: p,
+            }));
+          }
+        }
+
+        return out as unknown as AiSettingsState;
+      },
     }
   )
 );
