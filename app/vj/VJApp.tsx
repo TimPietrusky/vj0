@@ -8,7 +8,11 @@ import {
   DmxOutput,
   FIXTURE_PROFILES,
 } from "@/src/lib/lighting";
-import { useLightingStore, useFixtures } from "@/src/lib/stores";
+import {
+  useLightingStore,
+  useFixtures,
+  useAiSettingsStore,
+} from "@/src/lib/stores";
 import type { AudioFeatures } from "@/src/lib/audio-features";
 import { WebRtcAiTransport } from "@/src/lib/ai/webrtc-transport";
 import type {
@@ -96,17 +100,29 @@ export function VJApp() {
   const [showDebug, setShowDebug] = useState<boolean>(true);
 
   // Remote AI (WebRTC) UI state
-  const [showAi, setShowAi] = useState<boolean>(true);
+  const {
+    showAi,
+    sendFrames: aiSendFrames,
+    showCaptureDebug: aiShowCaptureDebug,
+    prompt: aiPrompt,
+    captureSize: aiCaptureSize,
+    outputSize: aiOutputSize,
+    frameRate: aiFrameRate,
+    seed: aiSeed,
+    setShowAi,
+    setSendFrames: setAiSendFrames,
+    setShowCaptureDebug: setAiShowCaptureDebug,
+    setPrompt: setAiPrompt,
+    setCaptureSize: setAiCaptureSize,
+    setOutputSize: setAiOutputSize,
+    setFrameRate: setAiFrameRate,
+    setSeed: setAiSeed,
+  } = useAiSettingsStore();
+
   const [aiStatus, setAiStatus] = useState<AiTransportStatus>("idle");
-  const [aiSendFrames, setAiSendFrames] = useState<boolean>(false);
   const [aiLogs, setAiLogs] = useState<string[]>([]);
   const [aiImageUrl, setAiImageUrl] = useState<string | null>(null);
-  const [aiPrompt, setAiPrompt] = useState<string>("colorful abstract art, vibrant neon lights, psychedelic patterns");
-  const [aiCaptureSize, setAiCaptureSize] = useState<number>(128); // What we capture (fast)
-  const [aiOutputSize, setAiOutputSize] = useState<number>(256);   // What AI generates
-  const [aiFrameRate, setAiFrameRate] = useState<number>(20);
   const [aiGenTime, setAiGenTime] = useState<number | null>(null);
-  const [aiSeed, setAiSeed] = useState<number>(42);
 
   // DMX/Lighting UI state
   const [dmxStatus, setDmxStatus] = useState<DmxStatus>("disconnected");
@@ -400,25 +416,7 @@ export function VJApp() {
     };
   }, [aiImageUrl]);
 
-  // Send prompt/settings to AI when they change
-  useEffect(() => {
-    if (!aiTransport.isConnected()) return;
-
-    // Pause frame sending temporarily to let settings take effect immediately
-    aiFrameSenderRef.current.running = false;
-    setTimeout(() => {
-      aiFrameSenderRef.current.running = true;
-    }, 100); // Resume after 100ms (enough for settings to process)
-
-    aiTransport.sendText(JSON.stringify({
-      prompt: aiPrompt,
-      seed: aiSeed,
-      captureWidth: aiCaptureSize,
-      captureHeight: aiCaptureSize,
-      width: aiOutputSize,
-      height: aiOutputSize
-    }));
-  }, [aiPrompt, aiSeed, aiCaptureSize, aiOutputSize, aiTransport, aiStatus]);
+  const aiSettingsResumeTimeoutRef = useRef<number | null>(null);
 
   // Debug canvas to show what we're sending to AI
   const aiDebugCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -525,6 +523,46 @@ export function VJApp() {
     }
   }, [aiTransport, aiCaptureSize, aiFrameRate]);
 
+  // Send prompt/settings to AI when they change
+  useEffect(() => {
+    if (!aiTransport.isConnected()) return;
+
+    const sender = aiFrameSenderRef.current;
+
+    // Pause frame sending temporarily to let settings take effect immediately
+    sender.running = false;
+    if (aiSettingsResumeTimeoutRef.current !== null) {
+      window.clearTimeout(aiSettingsResumeTimeoutRef.current);
+      aiSettingsResumeTimeoutRef.current = null;
+    }
+    aiSettingsResumeTimeoutRef.current = window.setTimeout(() => {
+      aiSettingsResumeTimeoutRef.current = null;
+      if (!aiSendFrames || !aiTransport.isConnected()) return;
+      sender.running = true;
+      sender.lastFrameTime = 0;
+      requestAnimationFrame(aiFrameLoop);
+    }, 100); // Resume after settings are pushed to server.
+
+    aiTransport.sendText(
+      JSON.stringify({
+        prompt: aiPrompt,
+        seed: aiSeed,
+        captureWidth: aiCaptureSize,
+        captureHeight: aiCaptureSize,
+        width: aiOutputSize,
+        height: aiOutputSize,
+      })
+    );
+  }, [
+    aiPrompt,
+    aiSeed,
+    aiCaptureSize,
+    aiOutputSize,
+    aiTransport,
+    aiSendFrames,
+    aiFrameLoop,
+  ]);
+
   // Start/stop frame sender imperatively
   useEffect(() => {
     const sender = aiFrameSenderRef.current;
@@ -542,7 +580,15 @@ export function VJApp() {
     return () => {
       sender.running = false;
     };
-  }, [aiSendFrames, aiStatus, aiFrameLoop]);
+  }, [aiSendFrames, aiStatus, aiFrameLoop, aiTransport]);
+
+  useEffect(() => {
+    return () => {
+      if (aiSettingsResumeTimeoutRef.current !== null) {
+        window.clearTimeout(aiSettingsResumeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Debug features polling - throttled to ~10fps
   useEffect(() => {
@@ -633,13 +679,40 @@ export function VJApp() {
         </div>
       )}
 
-      {/* Canvas container */}
-      <div className="relative w-full aspect-4/1 bg-neutral-950 rounded-lg overflow-hidden border border-neutral-800">
-        <canvas
-          ref={canvasRef}
-          className="w-full h-full"
-          style={{ imageRendering: "pixelated" }}
-        />
+      {/* Waveform + AI output preview */}
+      <div
+        className={
+          aiSendFrames
+            ? "grid grid-cols-1 md:grid-cols-[minmax(300px,1fr)_minmax(460px,1.6fr)] gap-3 items-start"
+            : "grid grid-cols-1"
+        }
+      >
+        <div className="relative w-full aspect-4/1 bg-neutral-950 rounded-lg overflow-hidden border border-neutral-800">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full"
+            style={{ imageRendering: "pixelated" }}
+          />
+        </div>
+
+        {aiSendFrames && (
+          <div className="relative w-full min-h-[260px] bg-neutral-950 rounded-lg overflow-hidden border border-neutral-800">
+            {aiImageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={aiImageUrl}
+                alt="AI generated output"
+                className="w-full h-full object-contain"
+              />
+            ) : (
+              <div className="w-full h-full text-xs font-mono text-neutral-600 flex items-center justify-center">
+                {aiStatus === "connected"
+                  ? "Waiting for AI frames..."
+                  : "Connect AI to preview output"}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* AI toggle */}
@@ -737,6 +810,8 @@ export function VJApp() {
               >
                 <option value={256}>256x256</option>
                 <option value={512}>512x512</option>
+                <option value={768}>768x768</option>
+                <option value={1024}>1024x1024</option>
               </select>
             </label>
 
@@ -765,7 +840,7 @@ export function VJApp() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {aiShowCaptureDebug && (
             <div className="rounded border border-neutral-800 bg-black/30 p-2">
               <div className="text-xs font-mono text-neutral-500 mb-2">
                 Sending to AI ({aiCaptureSize}x{aiCaptureSize} → {aiOutputSize}x{aiOutputSize})
@@ -778,27 +853,17 @@ export function VJApp() {
                 style={{ imageRendering: "pixelated" }}
               />
             </div>
+          )}
 
-            <div className="rounded border border-neutral-800 bg-black/30 p-2">
-              <div className="text-xs font-mono text-neutral-500 mb-2">
-                AI Generated (stable-fast)
-              </div>
-              {aiImageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={aiImageUrl}
-                  alt="AI generated output"
-                  className="w-full h-auto object-contain rounded"
-                />
-              ) : (
-                <div className="text-xs font-mono text-neutral-600 h-16 flex items-center justify-center">
-                  {aiStatus === "connected" 
-                    ? "Enable 'Generate AI visuals' to start" 
-                    : "Connect to RunPod AI to start"}
-                </div>
-              )}
-            </div>
-          </div>
+          <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+            <input
+              type="checkbox"
+              checked={aiShowCaptureDebug}
+              onChange={(e) => setAiShowCaptureDebug(e.target.checked)}
+              className="accent-cyan-500"
+            />
+            Show &quot;Sending to AI&quot; debug preview
+          </label>
 
           {/* Collapsible logs */}
           <details className="text-xs">

@@ -94,6 +94,29 @@ stable-fast 1.0.1 requires specific versions:
 ### 7. UDP Requires EU-RO-1 Datacenter
 Only the Romania datacenter supports UDP port exposure.
 
+### 8. WebRTC Connection Depends Heavily on Network Path
+If signaling works (`POST /webrtc/offer` returns 200) but WebRTC stays in `connecting` or fails, the issue is usually ICE path availability, not server health.
+
+Observed in practice:
+- Mobile hotspot often failed ICE candidate connectivity.
+- Stable Wi-Fi produced viable candidates and connected.
+
+Debug pattern from server logs:
+- `Offer candidates host=... srflx=... relay=...`
+- Healthy direct path: `srflx > 0` and `relay = 0` can still connect.
+- If all direct candidates fail, TURN relay may be required as fallback.
+
+Recommended strategy:
+- Default to STUN-only for zero relay bandwidth cost.
+- Keep TURN as optional fallback for restrictive networks.
+- Do not force `relay` unless direct ICE repeatedly fails.
+
+Example STUN-only client env:
+```bash
+NEXT_PUBLIC_VJ0_WEBRTC_ICE_TRANSPORT_POLICY=all
+NEXT_PUBLIC_VJ0_WEBRTC_ICE_SERVERS_JSON=[{"urls":"stun:stun.l.google.com:19302"}]
+```
+
 ## Installation Steps
 
 ### 1. Install Dependencies

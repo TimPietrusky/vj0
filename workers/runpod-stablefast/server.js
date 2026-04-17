@@ -8,6 +8,7 @@ const { spawn } = require("child_process");
 
 const PORT = Number(process.env.PORT || 3000);
 const INFERENCE_SCRIPT = process.env.INFERENCE_SCRIPT || "./inference_server.py";
+const ICE_GATHER_TIMEOUT_MS = Number(process.env.ICE_GATHER_TIMEOUT_MS || 10000);
 
 // ICE server configuration
 function getIceServers() {
@@ -23,6 +24,7 @@ function getIceServers() {
 // State
 let activePc = null;
 let activeChannel = null;
+let disconnectTimer = null;
 let inferenceProcess = null;
 let inferenceReady = false;
 let pendingRequests = [];
@@ -113,6 +115,10 @@ function clearPendingFrames() {
 
 // Close active WebRTC connection
 function closeActivePc() {
+  if (disconnectTimer) {
+    clearTimeout(disconnectTimer);
+    disconnectTimer = null;
+  }
   if (activeChannel) {
     try {
       activeChannel.close();
@@ -169,6 +175,21 @@ app.get("/healthz", (_req, res) => {
 
 app.post("/webrtc/offer", async (req, res) => {
   const body = req.body || {};
+  console.log("POST /webrtc/offer");
+  if (body?.sdp?.sdp && typeof body.sdp.sdp === "string") {
+    const offerSdp = body.sdp.sdp;
+    const lines = offerSdp.split("\n");
+    let host = 0;
+    let srflx = 0;
+    let relay = 0;
+    for (const l of lines) {
+      if (!l.startsWith("a=candidate:")) continue;
+      if (l.includes(" typ host")) host++;
+      else if (l.includes(" typ srflx")) srflx++;
+      else if (l.includes(" typ relay")) relay++;
+    }
+    console.log(`Offer candidates host=${host} srflx=${srflx} relay=${relay}`);
+  }
 
   if (!body.sdp || typeof body.sdp.type !== "string" || typeof body.sdp.sdp !== "string") {
     res.status(400).send("Expected body: { sdp: RTCSessionDescriptionInit }");
@@ -186,9 +207,36 @@ app.post("/webrtc/offer", async (req, res) => {
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
     console.log("Connection state:", s);
-    if (s === "failed" || s === "disconnected" || s === "closed") {
+    if (s === "connected" || s === "completed") {
+      if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+      }
+      return;
+    }
+    if (s === "disconnected") {
+      // "disconnected" is often transient. Give ICE time to recover.
+      if (disconnectTimer) clearTimeout(disconnectTimer);
+      disconnectTimer = setTimeout(() => {
+        if (activePc === pc && pc.connectionState === "disconnected") {
+          console.log("Connection remained disconnected, closing peer");
+          closeActivePc();
+        }
+        disconnectTimer = null;
+      }, 5000);
+      return;
+    }
+    if (s === "failed" || s === "closed") {
       if (activePc === pc) closeActivePc();
     }
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log("ICE connection state:", pc.iceConnectionState);
+  };
+
+  pc.onicegatheringstatechange = () => {
+    console.log("ICE gathering state:", pc.iceGatheringState);
   };
 
   pc.ondatachannel = (event) => {
@@ -229,13 +277,14 @@ app.post("/webrtc/offer", async (req, res) => {
     await pc.setRemoteDescription(body.sdp);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await waitForIceGatheringComplete(pc, 2000);
+    await waitForIceGatheringComplete(pc, ICE_GATHER_TIMEOUT_MS);
 
     if (!pc.localDescription) {
       res.status(500).send("Missing localDescription");
       return;
     }
 
+    console.log("Sending SDP answer");
     res.json({ sdp: pc.localDescription });
   } catch (err) {
     if (activePc === pc) closeActivePc();

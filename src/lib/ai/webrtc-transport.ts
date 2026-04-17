@@ -73,6 +73,7 @@ export class WebRtcAiTransport implements AiTransport {
   private readonly statusListeners = createListenerSet<StatusListener>();
 
   private opToken = 0;
+  private disconnectTimer: number | null = null;
 
   constructor(config: WebRtcAiTransportConfig) {
     this.config = config;
@@ -106,6 +107,11 @@ export class WebRtcAiTransport implements AiTransport {
   }
 
   private closeConnections() {
+    if (this.disconnectTimer !== null) {
+      window.clearTimeout(this.disconnectTimer);
+      this.disconnectTimer = null;
+    }
+
     const channel = this.channel;
     const pc = this.pc;
 
@@ -206,12 +212,39 @@ export class WebRtcAiTransport implements AiTransport {
       pc.onconnectionstatechange = () => {
         if (myToken !== this.opToken) return;
         const state = pc.connectionState;
-        if (
-          state === "failed" ||
-          state === "disconnected" ||
-          state === "closed"
-        ) {
-          if (this.status !== "error") this.setStatus("disconnected");
+
+        if (state === "connected") {
+          if (this.disconnectTimer !== null) {
+            window.clearTimeout(this.disconnectTimer);
+            this.disconnectTimer = null;
+          }
+          if (channel.readyState === "open") this.setStatus("connected");
+          return;
+        }
+
+        if (state === "disconnected") {
+          // "disconnected" can be transient on lossy networks. Delay downgrade.
+          if (this.disconnectTimer !== null) {
+            window.clearTimeout(this.disconnectTimer);
+          }
+          this.disconnectTimer = window.setTimeout(() => {
+            if (myToken !== this.opToken) return;
+            if (pc.connectionState === "disconnected" && this.status !== "error") {
+              this.setStatus("disconnected");
+            }
+            this.disconnectTimer = null;
+          }, 5000);
+          return;
+        }
+
+        if (state === "failed" || state === "closed") {
+          if (this.disconnectTimer !== null) {
+            window.clearTimeout(this.disconnectTimer);
+            this.disconnectTimer = null;
+          }
+          if (this.status !== "error") {
+            this.setStatus("disconnected");
+          }
         }
       };
 
@@ -220,7 +253,7 @@ export class WebRtcAiTransport implements AiTransport {
 
       await waitForIceGatheringComplete(
         pc,
-        this.config.iceGatheringTimeoutMs ?? 1500
+        this.config.iceGatheringTimeoutMs ?? 10000
       );
       if (myToken !== this.opToken) return;
 
@@ -297,4 +330,3 @@ export class WebRtcAiTransport implements AiTransport {
     return ch.bufferedAmount < maxBuffered;
   }
 }
-
