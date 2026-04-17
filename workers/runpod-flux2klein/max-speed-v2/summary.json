@@ -1,0 +1,42 @@
+{
+  "1_compile_all_with_encode": {
+    "mean_ms": 177.22,
+    "p50_ms": 177.14,
+    "p95_ms": 177.69,
+    "min_ms": 176.86,
+    "vram_gb": 15.99,
+    "setup_s": 11.8
+  },
+  "2_fuse_qkv": {
+    "error": "AttributeError: 'Flux2KleinKVPipeline' object has no attribute 'fuse_qkv_projections'",
+    "setup_s": 0.0
+  },
+  "3_sageattention": {
+    "error": "AssertionError: \n\nfrom user code:\n   File \"/usr/local/lib/python3.12/dist-packages/sageattention/core.py\", line 82, in sageattn\n    assert headdim in [64, 96, 128], \"headdim should be in [64, 96, 128].\"\n\nSet TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to P",
+    "setup_s": 5.0
+  },
+  "4_seqlen_64": {
+    "mean_ms": 168.2,
+    "p50_ms": 168.2,
+    "p95_ms": 168.48,
+    "min_ms": 167.91,
+    "vram_gb": 15.99,
+    "setup_s": 13.3
+  },
+  "5_steps_3": {
+    "mean_ms": 138.33,
+    "p50_ms": 138.32,
+    "p95_ms": 138.6,
+    "min_ms": 138.02,
+    "vram_gb": 15.99,
+    "setup_s": 2.1
+  },
+  "6_steps_2": {
+    "mean_ms": 100.19,
+    "p50_ms": 100.12,
+    "p95_ms": 101.13,
+    "min_ms": 99.46,
+    "vram_gb": 15.99,
+    "setup_s": 1.5
+  }
+}

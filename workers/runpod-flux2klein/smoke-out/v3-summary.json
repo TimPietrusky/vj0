@@ -1,0 +1,69 @@
+{
+  "1_preencoded_baseline": {
+    "lats_ms": [
+      273.8,
+      266.7,
+      266.9,
+      265.5,
+      266.6,
+      266.2
+    ],
+    "mean_ms": 267.6,
+    "p50_ms": 266.6,
+    "p95_ms": 272.1,
+    "min_ms": 265.5,
+    "vram_gb": 15.99,
+    "setup_s": 2.5
+  },
+  "2_compile_transformer": {
+    "lats_ms": [
+      238.2,
+      238.9,
+      238.7,
+      238.6,
+      238.8,
+      239.2
+    ],
+    "mean_ms": 238.7,
+    "p50_ms": 238.7,
+    "p95_ms": 239.1,
+    "min_ms": 238.2,
+    "vram_gb": 15.99,
+    "setup_s": 25.4
+  },
+  "3_compile_vae": {
+    "lats_ms": [
+      231.8,
+      231.9,
+      231.9,
+      232.1,
+      231.9,
+      231.8
+    ],
+    "mean_ms": 231.9,
+    "p50_ms": 231.9,
+    "p95_ms": 232.1,
+    "min_ms": 231.8,
+    "vram_gb": 15.99,
+    "setup_s": 10.1
+  },
+  "4_fp8_weight_only": {
+    "lats_ms": [
+      256.0,
+      256.9,
+      257.0,
+      256.8,
+      256.9,
+      258.5
+    ],
+    "mean_ms": 257.0,
+    "p50_ms": 256.9,
+    "p95_ms": 258.1,
+    "min_ms": 256.0,
+    "vram_gb": 12.12,
+    "setup_s": 178.9
+  },
+  "5_fp8_dyn_act_weight": {
+    "error": "InternalTorchDynamoError: RuntimeError: Polyfill handler <method-wrapper '__eq__' of builtin_function_or_method object at 0x77582d5b2bb0> does not have a traceable function\n\nfrom user code:\n   File \"/usr/local/lib/python3.12/d"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "1_baseline_2step_512": {
+    "mean_ms": 96.67,
+    "p50_ms": 96.6,
+    "p95_ms": 97.06,
+    "min_ms": 96.39,
+    "vram_gb": 15.99,
+    "fps": 10.34,
+    "setup_s": 5.0
+  },
+  "2_fuse_qkv_2step": {
+    "mean_ms": 95.93,
+    "p50_ms": 95.94,
+    "p95_ms": 96.15,
+    "min_ms": 95.7,
+    "vram_gb": 16.56,
+    "fps": 10.42,
+    "setup_s": 11.1
+  },
+  "3_sage_2step": {
+    "error": "AssertionError: \n\nfrom user code:\n   File \"/usr/local/lib/python3.12/dist-packages/sageattention/core.py\", line 82, in sageattn\n    assert headdim in [64, 96, 128], \"headdim should be in [64, 96, 128].\"\n\nSet TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to P"
+  },
+  "4_res_256_2step": {
+    "mean_ms": 32.42,
+    "p50_ms": 32.39,
+    "p95_ms": 32.65,
+    "min_ms": 32.29,
+    "vram_gb": 16.56,
+    "fps": 30.84,
+    "setup_s": 16.9
+  },
+  "4_res_384_2step": {
+    "mean_ms": 57.57,
+    "p50_ms": 57.58,
+    "p95_ms": 57.71,
+    "min_ms": 57.34,
+    "vram_gb": 16.56,
+    "fps": 17.37,
+    "setup_s": 17.7
+  },
+  "4_res_512_2step": {
+    "mean_ms": 96.08,
+    "p50_ms": 96.08,
+    "p95_ms": 96.51,
+    "min_ms": 95.79,
+    "vram_gb": 16.56,
+    "fps": 10.41,
+    "setup_s": 1.6
+  },
+  "5_res_256_3step": {
+    "mean_ms": 44.91,
+    "p50_ms": 44.89,
+    "p95_ms": 44.99,
+    "min_ms": 44.79,
+    "vram_gb": 16.56,
+    "fps": 22.27,
+    "setup_s": 0.7
+  },
+  "6_res_384_3step": {
+    "mean_ms": 79.58,
+    "p50_ms": 79.72,
+    "p95_ms": 79.96,
+    "min_ms": 79.01,
+    "vram_gb": 16.56,
+    "fps": 12.57,
+    "setup_s": 1.2
+  }
+}

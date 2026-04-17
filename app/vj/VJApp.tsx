@@ -13,6 +13,11 @@ import {
   useFixtures,
   useAiSettingsStore,
 } from "@/src/lib/stores";
+import {
+  AI_BACKEND_URLS,
+  AI_BACKEND_LABELS,
+  type AiBackend,
+} from "@/src/lib/stores/ai-settings-store";
 import type { AudioFeatures } from "@/src/lib/audio-features";
 import { WebRtcAiTransport } from "@/src/lib/ai/webrtc-transport";
 import type {
@@ -69,13 +74,16 @@ export function VJApp() {
     return undefined;
   }, []);
 
-  // AI signaling URL - defaults to local, can be overridden for RunPod
+  // Backend choice (persisted) picks the signaling URL. Env var still overrides.
+  // Use a store selector so the URL memo updates reactively on backend change.
+  const aiBackendSel = useAiSettingsStore((s) => s.backend);
   const aiSignalingUrl = useMemo(() => {
-    const url = process.env.NEXT_PUBLIC_VJ0_WEBRTC_SIGNALING_URL;
-    return url || "/api/webrtc/offer";
-  }, []);
+    const envOverride = process.env.NEXT_PUBLIC_VJ0_WEBRTC_SIGNALING_URL;
+    if (envOverride) return envOverride;
+    return AI_BACKEND_URLS[aiBackendSel] || "/api/webrtc/offer";
+  }, [aiBackendSel]);
 
-  // AI transport (WebRTC) - keep as stable instance
+  // AI transport (WebRTC) - keep as stable instance; rebuilt when signalingUrl changes
   const aiTransport = useMemo(
     () =>
       new WebRtcAiTransport({
@@ -85,6 +93,13 @@ export function VJApp() {
       }),
     [aiSignalingUrl, aiIceServers, aiIceTransportPolicy]
   );
+
+  // When transport changes (e.g. backend switch), stop the old one cleanly.
+  useEffect(() => {
+    return () => {
+      void aiTransport.stop();
+    };
+  }, [aiTransport]);
 
   // UI state - safe to use useState for these
   const [status, setStatus] = useState<Status>("idle");
@@ -101,6 +116,7 @@ export function VJApp() {
 
   // Remote AI (WebRTC) UI state
   const {
+    backend: aiBackend,
     showAi,
     sendFrames: aiSendFrames,
     showCaptureDebug: aiShowCaptureDebug,
@@ -109,6 +125,9 @@ export function VJApp() {
     outputSize: aiOutputSize,
     frameRate: aiFrameRate,
     seed: aiSeed,
+    kleinAlpha: aiKleinAlpha,
+    kleinSteps: aiKleinSteps,
+    setBackend: setAiBackend,
     setShowAi,
     setSendFrames: setAiSendFrames,
     setShowCaptureDebug: setAiShowCaptureDebug,
@@ -117,6 +136,8 @@ export function VJApp() {
     setOutputSize: setAiOutputSize,
     setFrameRate: setAiFrameRate,
     setSeed: setAiSeed,
+    setKleinAlpha: setAiKleinAlpha,
+    setKleinSteps: setAiKleinSteps,
   } = useAiSettingsStore();
 
   const [aiStatus, setAiStatus] = useState<AiTransportStatus>("idle");
@@ -427,19 +448,19 @@ export function VJApp() {
     captureCanvas: HTMLCanvasElement | null;
     captureCtx: CanvasRenderingContext2D | null;
     debugCtx: CanvasRenderingContext2D | null;
-    rgbBuffer: Uint8Array | null;
     lastFrameTime: number;
     resolution: number;
     frameCount: number;
+    pendingEncode: boolean;
   }>({
     running: false,
     captureCanvas: null,
     captureCtx: null,
     debugCtx: null,
-    rgbBuffer: null,
     lastFrameTime: 0,
     resolution: 0,
     frameCount: 0,
+    pendingEncode: false,
   });
 
   // Frame sender loop - runs outside React, uses RAF
@@ -458,13 +479,7 @@ export function VJApp() {
     }
 
     const src = canvasRef.current;
-    if (!src || !aiTransport.isConnected()) {
-      return;
-    }
-
-    // Backpressure: skip frame if send buffer is full (256KB threshold)
-    // This prevents queue overflow when generation is slower than capture
-    if (!aiTransport.canSend(256 * 1024)) {
+    if (!src) {
       return;
     }
 
@@ -473,14 +488,13 @@ export function VJApp() {
       sender.captureCanvas = document.createElement("canvas");
       sender.captureCanvas.width = aiCaptureSize;
       sender.captureCanvas.height = aiCaptureSize;
-      sender.captureCtx = sender.captureCanvas.getContext("2d", { willReadFrequently: true });
-      sender.rgbBuffer = new Uint8Array(aiCaptureSize * aiCaptureSize * 3);
+      // willReadFrequently no longer needed — we use toBlob (GPU path) instead of getImageData
+      sender.captureCtx = sender.captureCanvas.getContext("2d");
       sender.resolution = aiCaptureSize;
     }
 
     const ctx = sender.captureCtx;
-    const rgbData = sender.rgbBuffer;
-    if (!ctx || !rgbData) {
+    if (!ctx) {
       return;
     }
 
@@ -495,32 +509,52 @@ export function VJApp() {
       0, 0, aiCaptureSize, aiCaptureSize
     );
 
-    // Get pixels and convert RGBA -> RGB
-    const imageData = ctx.getImageData(0, 0, aiCaptureSize, aiCaptureSize);
-    const rgba = imageData.data;
-    for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
-      rgbData[j] = rgba[i];
-      rgbData[j + 1] = rgba[i + 1];
-      rgbData[j + 2] = rgba[i + 2];
-    }
-
-    // Send directly - no Blob allocation
-    aiTransport.sendBinary(rgbData);
     sender.lastFrameTime = now;
     sender.frameCount++;
 
-    // Update debug canvas less frequently (every 10 frames) to avoid perf hit
-    if (sender.frameCount % 10 === 0) {
-      const debugCanvas = aiDebugCanvasRef.current;
-      if (debugCanvas) {
-        if (!sender.debugCtx || debugCanvas.width !== aiCaptureSize) {
-          debugCanvas.width = aiCaptureSize;
-          debugCanvas.height = aiCaptureSize;
-          sender.debugCtx = debugCanvas.getContext("2d");
-        }
-        sender.debugCtx?.drawImage(sender.captureCanvas!, 0, 0);
+    // Always paint debug canvas so the preview works without a connection.
+    const debugCanvas = aiDebugCanvasRef.current;
+    if (debugCanvas) {
+      if (!sender.debugCtx || debugCanvas.width !== aiCaptureSize) {
+        debugCanvas.width = aiCaptureSize;
+        debugCanvas.height = aiCaptureSize;
+        sender.debugCtx = debugCanvas.getContext("2d");
       }
+      sender.debugCtx?.drawImage(sender.captureCanvas, 0, 0);
     }
+
+    // Only send over the wire when connected and there's headroom.
+    if (!aiTransport.isConnected() || !aiTransport.canSend(256 * 1024)) {
+      return;
+    }
+    // Skip if previous encode is still pending — avoids overlapping toBlob calls
+    // stacking up if network or CPU stalls.
+    if (sender.pendingEncode) {
+      return;
+    }
+
+    // Encode the capture canvas as JPEG via the browser's native (GPU-backed)
+    // encoder. Async, does not block the RAF loop. At 512² this is ~1-2ms and
+    // produces ~8-15KB of bytes — fits comfortably in one SCTP datagram, unlike
+    // raw RGB (196KB @ 256², which had reliability issues on the datachannel).
+    sender.pendingEncode = true;
+    sender.captureCanvas.toBlob(
+      (blob) => {
+        sender.pendingEncode = false;
+        if (!blob || !aiTransport.isConnected()) return;
+        blob
+          .arrayBuffer()
+          .then((buf) => {
+            if (!aiTransport.isConnected()) return;
+            aiTransport.sendBinary(buf);
+          })
+          .catch(() => {
+            /* network hiccup; next frame will try again */
+          });
+      },
+      "image/jpeg",
+      0.85
+    );
   }, [aiTransport, aiCaptureSize, aiFrameRate]);
 
   // Send prompt/settings to AI when they change
@@ -543,21 +577,27 @@ export function VJApp() {
       requestAnimationFrame(aiFrameLoop);
     }, 100); // Resume after settings are pushed to server.
 
-    aiTransport.sendText(
-      JSON.stringify({
-        prompt: aiPrompt,
-        seed: aiSeed,
-        captureWidth: aiCaptureSize,
-        captureHeight: aiCaptureSize,
-        width: aiOutputSize,
-        height: aiOutputSize,
-      })
-    );
+    const payload: Record<string, unknown> = {
+      prompt: aiPrompt,
+      seed: aiSeed,
+      captureWidth: aiCaptureSize,
+      captureHeight: aiCaptureSize,
+      width: aiOutputSize,
+      height: aiOutputSize,
+    };
+    if (aiBackend === "klein") {
+      payload.alpha = aiKleinAlpha;
+      payload.n_steps = aiKleinSteps;
+    }
+    aiTransport.sendText(JSON.stringify(payload));
   }, [
+    aiBackend,
     aiPrompt,
     aiSeed,
     aiCaptureSize,
     aiOutputSize,
+    aiKleinAlpha,
+    aiKleinSteps,
     aiTransport,
     aiSendFrames,
     aiFrameLoop,
@@ -567,7 +607,7 @@ export function VJApp() {
   useEffect(() => {
     const sender = aiFrameSenderRef.current;
     
-    if (aiSendFrames && aiTransport.isConnected()) {
+    if (aiSendFrames || aiShowCaptureDebug) {
       if (!sender.running) {
         sender.running = true;
         sender.lastFrameTime = 0;
@@ -580,7 +620,7 @@ export function VJApp() {
     return () => {
       sender.running = false;
     };
-  }, [aiSendFrames, aiStatus, aiFrameLoop, aiTransport]);
+  }, [aiSendFrames, aiShowCaptureDebug, aiStatus, aiFrameLoop, aiTransport]);
 
   useEffect(() => {
     return () => {
@@ -747,6 +787,24 @@ export function VJApp() {
             </div>
 
             <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+                Backend:
+                <select
+                  value={aiBackend}
+                  onChange={(e) => {
+                    void aiTransport.stop();
+                    setAiBackend(e.target.value as AiBackend);
+                  }}
+                  className="bg-black/50 border border-neutral-800 rounded px-2 py-1 text-neutral-200 max-w-[22em]"
+                  title={AI_BACKEND_LABELS[aiBackend]}
+                >
+                  {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
+                    <option key={k} value={k}>
+                      {AI_BACKEND_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
                 onClick={() => void aiTransport.start()}
                 disabled={aiStatus === "connecting" || aiStatus === "connected"}
@@ -788,7 +846,14 @@ export function VJApp() {
               Generate AI visuals
             </label>
 
-            <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+            <label
+              className="flex items-center gap-2 text-xs font-mono text-neutral-400"
+              title={
+                aiBackend === "klein"
+                  ? "For Klein best quality, match Capture to Output (both 256, or both 512). Mismatch = server upscales the input and output gets blurry."
+                  : "Client capture resolution. Smaller = less data to send, but blurrier input."
+              }
+            >
               Capture:
               <select
                 value={aiCaptureSize}
@@ -798,7 +863,17 @@ export function VJApp() {
                 <option value={64}>64 (fastest)</option>
                 <option value={128}>128</option>
                 <option value={256}>256</option>
+                <option value={512}>512</option>
               </select>
+              {aiBackend === "klein" && aiCaptureSize !== aiOutputSize && (
+                <button
+                  onClick={() => setAiCaptureSize(aiOutputSize)}
+                  className="px-2 py-0.5 rounded border border-amber-900 text-[10px] text-amber-400 hover:bg-amber-950/30"
+                  title={`Match capture to output (${aiOutputSize}) for sharper Klein results`}
+                >
+                  → {aiOutputSize}
+                </button>
+              )}
             </label>
 
             <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
@@ -840,18 +915,39 @@ export function VJApp() {
             </div>
           </div>
 
-          {aiShowCaptureDebug && (
-            <div className="rounded border border-neutral-800 bg-black/30 p-2">
-              <div className="text-xs font-mono text-neutral-500 mb-2">
-                Sending to AI ({aiCaptureSize}x{aiCaptureSize} → {aiOutputSize}x{aiOutputSize})
+          {/* Klein-specific controls */}
+          {aiBackend === "klein" && (
+            <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-neutral-900">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-600">
+                Klein
               </div>
-              <canvas
-                ref={aiDebugCanvasRef}
-                width={aiCaptureSize}
-                height={aiCaptureSize}
-                className="w-full h-auto rounded bg-black"
-                style={{ imageRendering: "pixelated" }}
-              />
+              <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+                Alpha: <span className="tabular-nums w-10 text-right">{aiKleinAlpha.toFixed(2)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={0.5}
+                  step={0.01}
+                  value={aiKleinAlpha}
+                  onChange={(e) => setAiKleinAlpha(Number(e.target.value))}
+                  className="accent-emerald-500 w-40"
+                  title="0 = pure prompt (ignore input)  ·  0.05-0.10 = subtle SDXL-turbo-like nudge  ·  0.15-0.25 = waveform shapes composition  ·  0.3+ = waveform dominates"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+                Steps:
+                <select
+                  value={aiKleinSteps}
+                  onChange={(e) => setAiKleinSteps(Number(e.target.value))}
+                  className="bg-black/50 border border-neutral-800 rounded px-2 py-1 text-neutral-200"
+                  title="Klein is distilled for 4 steps. 2 = fastest with good quality. 3/4 = higher quality, slower."
+                >
+                  <option value={1}>1 (fastest, lower quality)</option>
+                  <option value={2}>2 (recommended)</option>
+                  <option value={3}>3 (more detail)</option>
+                  <option value={4}>4 (max)</option>
+                </select>
+              </label>
             </div>
           )}
 
@@ -864,6 +960,21 @@ export function VJApp() {
             />
             Show &quot;Sending to AI&quot; debug preview
           </label>
+
+          {aiShowCaptureDebug && (
+            <div className="inline-flex flex-col gap-1 rounded border border-neutral-800 bg-black/30 p-2 self-start">
+              <div className="text-xs font-mono text-neutral-500">
+                Sending to AI ({aiCaptureSize}x{aiCaptureSize} → {aiOutputSize}x{aiOutputSize})
+              </div>
+              <canvas
+                ref={aiDebugCanvasRef}
+                width={aiCaptureSize}
+                height={aiCaptureSize}
+                className="rounded bg-black"
+                style={{ width: 128, height: 128, imageRendering: "pixelated" }}
+              />
+            </div>
+          )}
 
           {/* Collapsible logs */}
           <details className="text-xs">

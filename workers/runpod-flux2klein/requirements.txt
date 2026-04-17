@@ -1,0 +1,15 @@
+# Pinned versions for the FLUX.2 Klein worker on RunPod 5090 / Blackwell sm_120.
+# Base image: runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
+# Note: installing diffusers from main upgrades torch to 2.11.0+cu130 (auto)
+# Use `pip install --break-system-packages -r requirements.txt`. Do NOT install bitsandbytes.
+
+numpy
+pillow
+safetensors
+sentencepiece
+protobuf
+accelerate
+huggingface_hub
+transformers>=5.5.0
+git+https://github.com/huggingface/diffusers.git
+torchvision

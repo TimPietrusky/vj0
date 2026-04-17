@@ -1,0 +1,200 @@
+[
+  {
+    "quant": "fp4_r128",
+    "resolution": 256,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 93.0,
+    "p95_ms": 93.8,
+    "min_ms": 92.0,
+    "fps": 10.76,
+    "vram_gb": 12.75
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 256,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 134.2,
+    "p95_ms": 136.6,
+    "min_ms": 133.1,
+    "fps": 7.45,
+    "vram_gb": 12.65
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 256,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 173.4,
+    "p95_ms": 174.7,
+    "min_ms": 171.8,
+    "fps": 5.77,
+    "vram_gb": 12.65
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 384,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 126.2,
+    "p95_ms": 126.7,
+    "min_ms": 125.4,
+    "fps": 7.92,
+    "vram_gb": 12.88
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 384,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 179.6,
+    "p95_ms": 182.1,
+    "min_ms": 178.2,
+    "fps": 5.57,
+    "vram_gb": 12.78
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 384,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 234.1,
+    "p95_ms": 241.4,
+    "min_ms": 229.0,
+    "fps": 4.27,
+    "vram_gb": 12.78
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 512,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 188.0,
+    "p95_ms": 188.4,
+    "min_ms": 187.5,
+    "fps": 5.32,
+    "vram_gb": 13.06
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 512,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 263.9,
+    "p95_ms": 266.1,
+    "min_ms": 260.6,
+    "fps": 3.79,
+    "vram_gb": 12.96
+  },
+  {
+    "quant": "fp4_r128",
+    "resolution": 512,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 340.6,
+    "p95_ms": 341.5,
+    "min_ms": 338.9,
+    "fps": 2.94,
+    "vram_gb": 12.96
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 256,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 88.8,
+    "p95_ms": 93.4,
+    "min_ms": 87.4,
+    "fps": 11.27,
+    "vram_gb": 12.55
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 256,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 124.9,
+    "p95_ms": 126.2,
+    "min_ms": 123.9,
+    "fps": 8.01,
+    "vram_gb": 12.25
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 256,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 162.6,
+    "p95_ms": 163.5,
+    "min_ms": 162.0,
+    "fps": 6.15,
+    "vram_gb": 12.25
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 384,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 119.7,
+    "p95_ms": 120.7,
+    "min_ms": 119.1,
+    "fps": 8.35,
+    "vram_gb": 12.38
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 384,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 168.2,
+    "p95_ms": 170.3,
+    "min_ms": 166.7,
+    "fps": 5.95,
+    "vram_gb": 12.38
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 384,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 215.9,
+    "p95_ms": 218.0,
+    "min_ms": 214.2,
+    "fps": 4.63,
+    "vram_gb": 12.38
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 512,
+    "steps": 4,
+    "strength": 0.95,
+    "mean_ms": 179.7,
+    "p95_ms": 182.0,
+    "min_ms": 178.3,
+    "fps": 5.56,
+    "vram_gb": 12.55
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 512,
+    "steps": 6,
+    "strength": 0.95,
+    "mean_ms": 250.0,
+    "p95_ms": 251.1,
+    "min_ms": 248.6,
+    "fps": 4.0,
+    "vram_gb": 12.55
+  },
+  {
+    "quant": "fp4_r32",
+    "resolution": 512,
+    "steps": 8,
+    "strength": 0.95,
+    "mean_ms": 321.4,
+    "p95_ms": 322.9,
+    "min_ms": 319.9,
+    "fps": 3.11,
+    "vram_gb": 12.55
+  }
+]

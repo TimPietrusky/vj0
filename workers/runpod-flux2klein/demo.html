@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FLUX.2 Klein VJ — live img2img demo</title>
+<style>
+  body { margin: 0; padding: 16px; background: #111; color: #eee; font-family: ui-sans-serif, system-ui, sans-serif; }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 500; color: #ddd; }
+  .row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 12px; }
+  .card { background: #1a1a1a; padding: 12px; border-radius: 8px; }
+  canvas, img { display: block; background: #000; border-radius: 4px; }
+  .controls { display: grid; grid-template-columns: 110px 1fr 70px; gap: 8px 12px; align-items: center; min-width: 360px; }
+  label { font-size: 12px; color: #aaa; }
+  input[type=text] { width: 100%; padding: 6px 8px; background: #222; color: #eee; border: 1px solid #333; border-radius: 4px; }
+  input[type=range] { width: 100%; }
+  .val { font-family: ui-monospace, monospace; font-size: 12px; color: #aaa; text-align: right; }
+  button { padding: 8px 14px; background: #2a2a2a; color: #eee; border: 1px solid #444; border-radius: 4px; cursor: pointer; }
+  button:hover { background: #333; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status { font-family: ui-monospace, monospace; font-size: 12px; color: #6a6; }
+  .status.err { color: #e66; }
+  .stats { font-family: ui-monospace, monospace; font-size: 11px; color: #888; }
+  .preset { display: inline-block; margin-right: 4px; padding: 4px 8px; font-size: 11px; background: #333; border-radius: 3px; cursor: pointer; }
+  .preset:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<h1>FLUX.2 Klein — live img2img</h1>
+
+<div class="row">
+  <div class="card">
+    <div style="font-size: 11px; color: #888; margin-bottom: 4px;">Input (waveform)</div>
+    <canvas id="inputCanvas" width="256" height="256"></canvas>
+  </div>
+  <div class="card">
+    <div style="font-size: 11px; color: #888; margin-bottom: 4px;">AI output</div>
+    <img id="outputImg" width="256" height="256" alt="output">
+  </div>
+  <div class="card controls">
+    <label>Signaling URL</label>
+    <input type="text" id="urlInput" value="" placeholder="https://<pod>-3000.proxy.runpod.net">
+    <button id="connectBtn" style="grid-column: 3;">Connect</button>
+
+    <label>Prompt</label>
+    <input type="text" id="promptInput" value="vibrant neon cyberpunk city street at night, rain, reflections, wide angle">
+    <button id="updateBtn" style="grid-column: 3;">Send</button>
+
+    <label>Resolution</label>
+    <select id="sizeInput" style="background:#222;color:#eee;border:1px solid #333;padding:4px;border-radius:4px;">
+      <option value="256">256² (~30 fps)</option>
+      <option value="384">384² (~17 fps)</option>
+      <option value="512">512² (~10 fps)</option>
+    </select>
+    <span class="val" id="sizeVal">256</span>
+
+    <label>Steps</label>
+    <input type="range" id="stepsInput" min="1" max="4" step="1" value="2">
+    <span class="val" id="stepsVal">2</span>
+
+    <label>Alpha</label>
+    <input type="range" id="alphaInput" min="0" max="0.5" step="0.01" value="0.10">
+    <span class="val" id="alphaVal">0.10</span>
+
+    <label>Seed</label>
+    <input type="text" id="seedInput" value="42">
+    <button id="randSeedBtn" style="grid-column: 3;">🎲</button>
+
+    <div style="grid-column: 1 / 4;">
+      <span class="preset" data-prompt="aurora borealis over snowy mountains, green and purple sky, long exposure">Aurora</span>
+      <span class="preset" data-prompt="vibrant neon cyberpunk city street at night, rain, reflections">Cyberpunk</span>
+      <span class="preset" data-prompt="spiral galaxy with pink and blue nebula, dust clouds, deep space">Galaxy</span>
+      <span class="preset" data-prompt="underwater caustics, sun rays piercing blue water, dreamy">Underwater</span>
+      <span class="preset" data-prompt="black ink dropping into water, slow motion, white background, macro">Ink</span>
+      <span class="preset" data-prompt="flames dancing in the dark, high speed photograph, black background">Flames</span>
+    </div>
+
+    <div style="grid-column: 1 / 4;" class="status" id="status">disconnected</div>
+    <div style="grid-column: 1 / 4;" class="stats" id="stats"></div>
+  </div>
+</div>
+
+<script>
+const inputCanvas = document.getElementById("inputCanvas");
+const inputCtx = inputCanvas.getContext("2d", { willReadFrequently: true });
+const outputImg = document.getElementById("outputImg");
+const status = document.getElementById("status");
+const stats = document.getElementById("stats");
+
+const $ = id => document.getElementById(id);
+const els = {
+  url: $("urlInput"), connect: $("connectBtn"), update: $("updateBtn"),
+  prompt: $("promptInput"), size: $("sizeInput"), sizeVal: $("sizeVal"),
+  steps: $("stepsInput"), stepsVal: $("stepsVal"),
+  alpha: $("alphaInput"), alphaVal: $("alphaVal"),
+  seed: $("seedInput"), randSeed: $("randSeedBtn"),
+};
+
+// Default URL: try to read from query string ?url=... otherwise leave blank
+const params = new URLSearchParams(location.search);
+if (params.get("url")) els.url.value = params.get("url");
+if (params.get("prompt")) els.prompt.value = params.get("prompt");
+
+let pc = null, dc = null, sendTimer = null, frameCount = 0, lastT = performance.now();
+let connected = false;
+
+function setStatus(msg, isErr) {
+  status.textContent = msg;
+  status.className = isErr ? "status err" : "status";
+}
+
+// Generate a synthetic moving waveform on the input canvas.
+let phase = 0;
+function drawWaveform() {
+  const w = inputCanvas.width, h = inputCanvas.height;
+  inputCtx.fillStyle = "#000";
+  inputCtx.fillRect(0, 0, w, h);
+  inputCtx.strokeStyle = "#fff";
+  inputCtx.lineWidth = 2.5;
+  inputCtx.beginPath();
+  for (let x = 0; x < w; x++) {
+    const u = x / w;
+    // jagged "audio waveform" mix of frequencies
+    const y = h/2 + (h * 0.35) * (
+      Math.sin(u*23 + phase) * 0.6 +
+      Math.sin(u*61 + phase*1.7) * 0.25 +
+      Math.sin(u*113 + phase*0.4) * 0.15
+    );
+    if (x === 0) inputCtx.moveTo(x, y); else inputCtx.lineTo(x, y);
+  }
+  inputCtx.stroke();
+  phase += 0.05;
+}
+setInterval(drawWaveform, 33); // 30fps animation
+
+// Resize canvas + adjust output img size
+function applySize() {
+  const s = parseInt(els.size.value);
+  inputCanvas.width = s; inputCanvas.height = s;
+  outputImg.width = s; outputImg.height = s;
+  els.sizeVal.textContent = s;
+  drawWaveform();
+}
+els.size.addEventListener("change", () => { applySize(); sendParams(); });
+els.steps.addEventListener("input", () => { els.stepsVal.textContent = els.steps.value; sendParams(); });
+els.alpha.addEventListener("input", () => { els.alphaVal.textContent = parseFloat(els.alpha.value).toFixed(2); sendParams(); });
+els.randSeed.onclick = () => { els.seed.value = Math.floor(Math.random() * 1000000); sendParams(); };
+document.querySelectorAll(".preset").forEach(p =>
+  p.onclick = () => { els.prompt.value = p.dataset.prompt; sendParams(); });
+
+// Capture as JPEG (small, fits in one SCTP message reliably)
+async function getCaptureBytes() {
+  const blob = await new Promise(res => inputCanvas.toBlob(res, "image/jpeg", 0.85));
+  return await blob.arrayBuffer();
+}
+
+function sendParams() {
+  if (!dc || dc.readyState !== "open") return;
+  const s = parseInt(els.size.value);
+  dc.send(JSON.stringify({
+    prompt: els.prompt.value,
+    seed: parseInt(els.seed.value) || 42,
+    captureWidth: s, captureHeight: s,
+    width: s, height: s,
+    alpha: parseFloat(els.alpha.value),
+    n_steps: parseInt(els.steps.value),
+  }));
+}
+els.update.onclick = sendParams;
+
+function startFrameLoop() {
+  if (sendTimer) clearInterval(sendTimer);
+  sendTimer = setInterval(async () => {
+    if (!dc || dc.readyState !== "open") return;
+    if (dc.bufferedAmount > 256 * 1024) return; // backpressure
+    dc.send(await getCaptureBytes());
+  }, 33); // attempt 30fps; server will return as fast as it can
+}
+
+async function connect() {
+  let url = els.url.value.trim();
+  if (!url) { setStatus("enter signaling URL", true); return; }
+  // accept either base URL or full /webrtc/offer endpoint
+  if (!url.endsWith("/webrtc/offer")) url = url.replace(/\/$/, "") + "/webrtc/offer";
+
+  setStatus("connecting...");
+  els.connect.disabled = true;
+
+  try {
+    pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+
+    pc.onconnectionstatechange = () => setStatus("pc " + pc.connectionState);
+    pc.oniceconnectionstatechange = () => console.log("ice:", pc.iceConnectionState);
+
+    dc = pc.createDataChannel("frames", { ordered: false, maxRetransmits: 0 });
+    dc.binaryType = "arraybuffer";
+
+    dc.onopen = () => {
+      setStatus("connected — sending frames");
+      connected = true;
+      sendParams();
+      startFrameLoop();
+    };
+    dc.onclose = () => { setStatus("disconnected"); connected = false; els.connect.disabled = false; };
+    dc.onerror = e => { setStatus("dc error: " + e, true); };
+
+    dc.onmessage = (ev) => {
+      if (typeof ev.data === "string") {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.type === "stats") {
+            frameCount++;
+            const now = performance.now();
+            const dt = now - lastT;
+            if (dt > 500) {
+              const fps = (frameCount * 1000 / dt).toFixed(1);
+              stats.textContent = `gen ${m.gen_time_ms}ms · ${m.width}×${m.height} · ${fps} fps observed · buffered ${dc.bufferedAmount}`;
+              frameCount = 0; lastT = now;
+            }
+          }
+        } catch {}
+      } else {
+        // JPEG frame
+        const blob = new Blob([ev.data], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        const old = outputImg.src;
+        outputImg.onload = () => { if (old.startsWith("blob:")) URL.revokeObjectURL(old); };
+        outputImg.src = url;
+      }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // Wait for ICE gathering to complete (or timeout)
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === "complete") return resolve();
+      const t = setTimeout(resolve, 5000);
+      pc.addEventListener("icegatheringstatechange", () => {
+        if (pc.iceGatheringState === "complete") { clearTimeout(t); resolve(); }
+      });
+    });
+
+    const res = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: pc.localDescription }),
+    });
+    if (!res.ok) throw new Error(`signaling ${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    await pc.setRemoteDescription(json.sdp);
+    setStatus("ICE negotiation done, awaiting datachannel...");
+  } catch (e) {
+    setStatus("connect failed: " + e.message, true);
+    els.connect.disabled = false;
+  }
+}
+els.connect.onclick = connect;
+
+// Initial state
+applySize();
+drawWaveform();
+</script>
+</body>
+</html>

@@ -23,7 +23,7 @@ export class WaveformScene implements VjScene {
   private centerY = 128;
 
   // Style configuration
-  private readonly strokeColor = '#00ff88';
+  private readonly strokeColor = '#ffffff';
   private readonly backgroundColor = '#0a0a0a';
   private readonly baseLineWidth = 2;
   private readonly maxLineWidth = 6;

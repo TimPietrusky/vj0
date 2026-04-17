@@ -1,0 +1,19 @@
+{
+  "config": "FLUX.1-schnell + InstantX FLUX.1-dev Canny ControlNet, img2img, 512x512, 4 steps, bf16, enable_model_cpu_offload",
+  "mean_ms": 9936.5,
+  "p50_ms": 9935.7,
+  "p95_ms": 9951.6,
+  "min_ms": 9912.7,
+  "max_ms": 9956.2,
+  "vram_mb": 26464.4,
+  "all_ms": [
+    9951.6,
+    9937.3,
+    9932.9,
+    9934.0,
+    9912.7,
+    9945.8,
+    9956.2,
+    9921.4
+  ]
+}
