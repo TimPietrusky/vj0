@@ -38,8 +38,6 @@ export function SystemsBar({
   onHideUi,
   hideUi,
 }: SystemsBarProps) {
-  // Audio / visual share a "running" state in our model — AudioEngine feeds VisualEngine.
-  const audioLive = audioStatus === "running";
   const audioTone = audioStatus === "error"
     ? "error"
     : audioStatus === "running"
@@ -47,8 +45,6 @@ export function SystemsBar({
     : audioStatus === "requesting"
     ? "info"
     : "info";
-
-  const visualTone = audioLive ? "live" : "info";
 
   const aiTone: Tone =
     aiStatus === "connected"
@@ -70,7 +66,7 @@ export function SystemsBar({
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel)]/95 backdrop-blur-sm">
-      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-2 font-mono text-[11px] uppercase tracking-wider">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 font-mono text-[10px] uppercase tracking-wider">
         <BrandSigil />
 
         <SysBlock
@@ -82,7 +78,7 @@ export function SystemsBar({
                 ? trimLabel(audioDeviceLabel)
                 : "live"
               : audioStatus === "requesting"
-              ? "requesting…"
+              ? "starting…"
               : audioStatus === "error"
               ? "error"
               : "idle"
@@ -90,13 +86,7 @@ export function SystemsBar({
         />
 
         <SysBlock
-          label="Visual"
-          tone={visualTone}
-          value={audioLive ? "running · 60fps" : "stopped"}
-        />
-
-        <SysBlock
-          label={`AI · ${aiBackend}`}
+          label={aiBackend}
           tone={aiTone}
           value={formatAi(aiStatus, aiGenTimeMs)}
           title={AI_BACKEND_LABELS[aiBackend]}
@@ -109,18 +99,29 @@ export function SystemsBar({
             dmxStatus === "unsupported"
               ? "no webusb"
               : dmxStatus === "connected"
-              ? `${dmxActiveCount}/${dmxFixtureCount} fx`
+              ? `${dmxActiveCount}/${dmxFixtureCount}`
               : dmxStatus
           }
         />
 
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-[10px] text-[color:var(--vj-ink-dim)] normal-case tracking-normal">
-            keys · <span className="text-[color:var(--vj-info)]">1-9</span>{" "}
-            presets · <span className="text-[color:var(--vj-info)]">Space</span>{" "}
-            freeze · <span className="text-[color:var(--vj-info)]">↑↓</span>{" "}
-            alpha · <span className="text-[color:var(--vj-info)]">H</span> hide
+          <span
+            className="text-[9px] text-[color:var(--vj-ink-dim)] normal-case tracking-normal hidden md:inline"
+            title="Hotkeys: 1-9 fire preset · Space toggle generate · ↑↓ klein alpha · H hide UI"
+          >
+            <span className="text-[color:var(--vj-info)]">1-9</span> presets ·{" "}
+            <span className="text-[color:var(--vj-info)]">Space</span> generate ·{" "}
+            <span className="text-[color:var(--vj-info)]">H</span> hide
           </span>
+          <a
+            href="/vj/stage"
+            target="_blank"
+            rel="noreferrer"
+            className="vj-btn"
+            title="Open audience-only fullscreen output"
+          >
+            Stage ↗
+          </a>
           <button
             onClick={onHideUi}
             className="vj-btn vj-btn--accent"

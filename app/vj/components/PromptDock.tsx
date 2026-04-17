@@ -6,7 +6,10 @@ import type { PromptPreset } from "@/src/lib/stores/ai-settings-store";
 
 interface PromptDockProps {
   activePrompt: string;
+  /** Commits the typed prompt as-is (Enter in input). */
   onSetPrompt: (p: string) => void;
+  /** Fires a preset (chip click). Typically also re-rolls the seed. */
+  onFirePreset?: (p: string) => void;
   presets: PromptPreset[];
   onUpdatePreset: (index: number, patch: Partial<PromptPreset>) => void;
 }
@@ -18,9 +21,11 @@ interface PromptDockProps {
 export function PromptDock({
   activePrompt,
   onSetPrompt,
+  onFirePreset,
   presets,
   onUpdatePreset,
 }: PromptDockProps) {
+  const fire = onFirePreset ?? onSetPrompt;
   const [draft, setDraft] = useState(activePrompt);
   useEffect(() => {
     setDraft(activePrompt);
@@ -71,7 +76,7 @@ export function PromptDock({
       <PresetChips
         presets={presets}
         activePrompt={activePrompt}
-        onFire={onSetPrompt}
+        onFire={fire}
         onEdit={onUpdatePreset}
       />
     </div>

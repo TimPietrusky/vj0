@@ -131,11 +131,14 @@ class PromptCache:
         return self.embeds
 
 
-def encode_image_to_latents(pipe, img_pil, target_size):
-    """Convert PIL RGB → patched VAE latents matching the pipeline's internal format."""
+def encode_image_to_latents(pipe, img_pil, width, height):
+    """Convert PIL RGB → patched VAE latents matching the pipeline's internal format.
+    Latent spatial shape derives from (width, height); passing a square here when the
+    pipeline is configured for a non-square output produces a square output regardless
+    of the height/width args to pipe(...) — the latents shape wins."""
     from diffusers.pipelines.flux2.pipeline_flux2 import retrieve_latents
-    if img_pil.size != (target_size, target_size):
-        img_pil = img_pil.resize((target_size, target_size), Image.LANCZOS)
+    if img_pil.size != (width, height):
+        img_pil = img_pil.resize((width, height), Image.LANCZOS)
     arr = np.asarray(img_pil, dtype=np.float32) / 127.5 - 1.0
     t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).to("cuda", dtype=torch.bfloat16)
     raw = retrieve_latents(pipe.vae.encode(t), sample_mode="argmax")
@@ -163,7 +166,7 @@ def warmup(pipe, prompt_cache, width, height, alpha, n_steps):
     log(f"warmup at {width}×{height}, n_steps={n_steps} ({WARMUP_ITERS} iters; first one triggers compile)")
     embeds = prompt_cache.get(DEFAULT_PROMPT)
     fake_img = Image.new("RGB", (width, height), (32, 32, 32))
-    lat = encode_image_to_latents(pipe, fake_img, width)
+    lat = encode_image_to_latents(pipe, fake_img, width, height)
     for i in range(WARMUP_ITERS):
         t0 = time.perf_counter()
         _ = generate(pipe, lat, embeds, alpha, n_steps, height, width, DEFAULT_SEED)
@@ -295,7 +298,7 @@ def main():
             embeds = prompt_cache.get(state["prompt"])
             torch.cuda.synchronize()
             t0 = time.perf_counter()
-            lat = encode_image_to_latents(pipe, input_img, state["width"])
+            lat = encode_image_to_latents(pipe, input_img, state["width"], state["height"])
             out = generate(pipe, lat, embeds,
                            state["alpha"], state["n_steps"],
                            state["height"], state["width"], state["seed"])

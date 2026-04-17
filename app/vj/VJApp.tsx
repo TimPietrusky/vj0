@@ -16,8 +16,6 @@ import {
 import {
   AI_BACKEND_URLS,
   AI_BACKEND_LABELS,
-  OUTPUT_PRESETS,
-  findOutputPreset,
   type AiBackend,
   type UpscaleMode,
 } from "@/src/lib/stores/ai-settings-store";
@@ -43,6 +41,7 @@ import {
   SystemsBar,
   PromptDock,
   Field,
+  ResPicker,
 } from "./components";
 
 type Status = "idle" | "requesting" | "running" | "error";
@@ -138,7 +137,8 @@ export function VJApp() {
   const [debugFeatures, setDebugFeatures] = useState<AudioFeatures | null>(
     null
   );
-  const [showDebug, setShowDebug] = useState<boolean>(false);
+  // Audio features start visible — user wants the dashboard fully populated.
+  const [showDebug, setShowDebug] = useState<boolean>(true);
 
   // Remote AI (WebRTC) UI state
   const {
@@ -199,6 +199,17 @@ export function VJApp() {
     stageChannelRef.current?.postMessage({ type: "prompt", prompt: aiPrompt });
   }, [aiPrompt]);
 
+  // Firing a preset = swap prompt + re-roll seed. Hotkeys (1-9) and chip
+  // clicks share this so hammering the same preset gives fresh variations
+  // every time, and jumping between presets always re-inits the noise.
+  const firePreset = useCallback(
+    (prompt: string) => {
+      setAiPrompt(prompt);
+      setAiSeed(Math.floor(Math.random() * 1_000_000));
+    },
+    [setAiPrompt, setAiSeed]
+  );
+
   // Global hotkeys for live performance. Skip when typing in input/textarea/select.
   useEffect(() => {
     const isTyping = () => {
@@ -218,7 +229,7 @@ export function VJApp() {
         const idx = parseInt(e.key, 10) - 1;
         const preset = aiPromptPresets[idx];
         if (preset) {
-          setAiPrompt(preset.prompt);
+          firePreset(preset.prompt);
           e.preventDefault();
         }
         return;
@@ -255,9 +266,9 @@ export function VJApp() {
     aiKleinAlpha,
     aiPromptPresets,
     aiSendFrames,
+    firePreset,
     setAiHideUi,
     setAiKleinAlpha,
-    setAiPrompt,
     setAiSendFrames,
   ]);
 
@@ -742,6 +753,10 @@ export function VJApp() {
     aiTransport,
     aiSendFrames,
     aiFrameLoop,
+    // Re-fire when status flips to "connected" so the server picks up our
+    // current resolution / seed / etc. instead of using its defaults.
+    // Critical for auto-connect: settings can't push before the channel exists.
+    aiStatus,
   ]);
 
   useEffect(() => {
@@ -881,11 +896,12 @@ export function VJApp() {
         </div>
       )}
 
-      {/* Dashboard grid — 12 cols at wide width, reflows at narrow */}
-      <div className="flex-1 w-full grid grid-cols-1 xl:grid-cols-12 gap-3 p-3">
+      {/* Dashboard grid — 12 cols at wide width, reflows at narrow.
+          Tight gap + padding so everything fits in one viewport. */}
+      <div className="flex-1 w-full grid grid-cols-1 xl:grid-cols-12 gap-2 p-2">
         {/* ============== LEFT COL: waveform + sources ============== */}
-        <section className="xl:col-span-4 flex flex-col gap-3 min-w-0">
-          <div className="vj-panel p-3 flex flex-col gap-3">
+        <section className="xl:col-span-3 flex flex-col gap-2 min-w-0">
+          <div className="vj-panel p-2 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="vj-panel-title">Waveform / Source</div>
               <div className="flex items-center gap-1.5 text-[10px] text-[color:var(--vj-ink-dim)] normal-case">
@@ -954,12 +970,13 @@ export function VJApp() {
             </div>
           </div>
 
-          <div className="vj-panel p-3 flex flex-col gap-2">
+          <div className="vj-panel p-2 flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <div className="vj-panel-title">Audio Features</div>
               <button
                 onClick={() => setShowDebug(!showDebug)}
                 className="vj-btn"
+                title="Hides the panel and stops the polling timer."
               >
                 {showDebug ? "Hide" : "Show"}
               </button>
@@ -969,42 +986,37 @@ export function VJApp() {
         </section>
 
         {/* ============== CENTER COL: AI output + prompt ============== */}
-        <section className="xl:col-span-5 flex flex-col gap-3 min-w-0">
-          <div className="vj-panel p-3 flex flex-col gap-3 flex-1">
+        <section className="xl:col-span-5 flex flex-col gap-2 min-w-0">
+          <div className="vj-panel p-2 flex flex-col gap-2 flex-1">
             <div className="flex items-center justify-between gap-2">
               <div className="vj-panel-title">AI Output</div>
-              <div className="flex items-center gap-2">
-                <label
-                  className="flex items-center gap-2 text-[11px] font-mono text-[color:var(--vj-ink-dim)]"
-                  title={!aiTransport.isConnected() ? "Connect AI first" : undefined}
-                >
-                  <input
-                    type="checkbox"
-                    checked={aiSendFrames}
-                    onChange={(e) => setAiSendFrames(e.target.checked)}
-                    disabled={!aiTransport.isConnected()}
-                    className="vj-check"
-                  />
-                  <span className="uppercase tracking-wider">Generate</span>
-                </label>
-                <a
-                  href="/vj/stage"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="vj-btn"
-                  title="Open audience-only fullscreen output in a new tab"
-                >
-                  Stage ↗
-                </a>
-              </div>
+              <button
+                type="button"
+                onClick={() => setAiSendFrames(!aiSendFrames)}
+                disabled={!aiTransport.isConnected()}
+                className={`vj-btn ${aiSendFrames ? "vj-btn--live" : "vj-btn--accent"}`}
+                title={
+                  !aiTransport.isConnected()
+                    ? "Connect AI first"
+                    : "Toggle generation (Space)"
+                }
+              >
+                {aiSendFrames ? "■ stop" : "▶ generate"}
+              </button>
             </div>
 
-            {/* Hero output preview — big, honors aspect via object-contain */}
+            {/* Hero output preview — honours aspect via object-contain. Capped
+                at a sensible max-height so a small generated res doesn't
+                stretch into a wall-sized blurry image. The aspectRatio +
+                max-height combo: height hits cap first, width derives from
+                aspect, mx-auto centres the resulting box. */}
             <div
-              className="vj-canvas-frame w-full flex items-center justify-center"
+              className="vj-canvas-frame flex items-center justify-center mx-auto"
               style={{
                 aspectRatio: `${aiOutputWidth} / ${aiOutputHeight}`,
-                minHeight: 240,
+                maxHeight: 320,
+                maxWidth: "100%",
+                width: "auto",
               }}
             >
               {aiImageUrl ? (
@@ -1045,6 +1057,7 @@ export function VJApp() {
             <PromptDock
               activePrompt={aiPrompt}
               onSetPrompt={setAiPrompt}
+              onFirePreset={firePreset}
               presets={aiPromptPresets}
               onUpdatePreset={updatePromptPreset}
             />
@@ -1052,9 +1065,9 @@ export function VJApp() {
         </section>
 
         {/* ============== RIGHT COL: AI settings + lighting ============== */}
-        <aside className="xl:col-span-3 flex flex-col gap-3 min-w-0">
+        <aside className="xl:col-span-4 grid grid-cols-1 lg:grid-cols-2 gap-3 min-w-0 content-start">
           {/* AI backend + connection */}
-          <div className="vj-panel p-3 flex flex-col gap-3">
+          <div className="vj-panel p-2 flex flex-col gap-2 lg:col-span-2">
             <div className="vj-panel-title">AI Backend</div>
 
             <Field label="Model">
@@ -1108,7 +1121,7 @@ export function VJApp() {
           </div>
 
           {/* Generation parameters */}
-          <div className="vj-panel p-3 flex flex-col gap-3">
+          <div className="vj-panel p-2 flex flex-col gap-2">
             <div className="vj-panel-title">Generation</div>
 
             <div className="grid grid-cols-2 gap-2">
@@ -1146,26 +1159,12 @@ export function VJApp() {
               </Field>
             </div>
 
-            <Field label="Output preset">
-              <select
-                value={
-                  findOutputPreset(aiOutputWidth, aiOutputHeight)?.id ??
-                  `${aiOutputWidth}x${aiOutputHeight}`
-                }
-                onChange={(e) => {
-                  const preset = OUTPUT_PRESETS.find(
-                    (p) => p.id === e.target.value
-                  );
-                  if (preset) setAiOutputSize(preset.w, preset.h);
-                }}
-                className="vj-input"
-              >
-                {OUTPUT_PRESETS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
+            <Field label="Output">
+              <ResPicker
+                width={aiOutputWidth}
+                height={aiOutputHeight}
+                onPick={setAiOutputSize}
+              />
             </Field>
 
             {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
@@ -1215,7 +1214,7 @@ export function VJApp() {
 
           {/* Klein-specific */}
           {aiBackend === "klein" && (
-            <div className="vj-panel p-3 flex flex-col gap-3">
+            <div className="vj-panel p-2 flex flex-col gap-2">
               <div className="vj-panel-title">Klein Img2Img</div>
 
               <div className="flex flex-col gap-1">
@@ -1265,7 +1264,7 @@ export function VJApp() {
           )}
 
           {/* Debug capture preview + logs (collapsed by default) */}
-          <div className="vj-panel p-3 flex flex-col gap-2">
+          <div className="vj-panel p-2 flex flex-col gap-2">
             <div className="flex items-center justify-between gap-2">
               <div className="vj-panel-title">Capture Debug</div>
               <label className="flex items-center gap-2 text-[11px] font-mono text-[color:var(--vj-ink-dim)]">
@@ -1315,7 +1314,7 @@ export function VJApp() {
           </div>
 
           {/* Lighting panel — keep existing, dress the wrapper only */}
-          <div className="vj-panel p-3 flex flex-col gap-2">
+          <div className="vj-panel p-2 flex flex-col gap-2 lg:col-span-2">
             <div className="vj-panel-title">Lighting / DMX</div>
             <LightingPanel
               dmxStatus={dmxStatus}

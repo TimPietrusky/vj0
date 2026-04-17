@@ -25,9 +25,10 @@ export type PromptPreset = {
 };
 
 // Output resolution presets for the AI generator. FLUX.2 requires both
-// dimensions divisible by 16 — the 16:9 entries below respect that
-// (256×144, 512×288, 768×432, 1024×576 are the clean 16:9 sizes that also
-// divide by 16). Projector-friendly widescreen is the 16:9 column.
+// dimensions divisible by 16. We cap at 512×512 — bigger than that costs
+// too much per-frame for live performance. Projector-friendly widescreen
+// options dominate the small end (16:9 and near-16:9 wide formats), since
+// that's what most VJ rigs actually output to.
 export type OutputPreset = {
   id: string;
   label: string;
@@ -36,13 +37,15 @@ export type OutputPreset = {
 };
 
 export const OUTPUT_PRESETS: OutputPreset[] = [
-  { id: "256x144",  w: 256,  h: 144, label: "256×144 · 16:9 · fast (projector)" },
-  { id: "256x256",  w: 256,  h: 256, label: "256×256 · 1:1 · fast" },
-  { id: "384x384",  w: 384,  h: 384, label: "384×384 · 1:1 · balanced" },
-  { id: "512x288",  w: 512,  h: 288, label: "512×288 · 16:9 · quality (projector)" },
-  { id: "512x512",  w: 512,  h: 512, label: "512×512 · 1:1 · quality" },
-  { id: "768x432",  w: 768,  h: 432, label: "768×432 · 16:9 · premium" },
-  { id: "1024x576", w: 1024, h: 576, label: "1024×576 · 16:9 · cinema" },
+  { id: "192x112", w: 192, h: 112, label: "192×112 · ~16:9 · ultra-fast (projector)" },
+  { id: "256x144", w: 256, h: 144, label: "256×144 · 16:9 · fast (projector)" },
+  { id: "256x256", w: 256, h: 256, label: "256×256 · 1:1 · fast" },
+  { id: "320x176", w: 320, h: 176, label: "320×176 · ~16:9 · fast (projector)" },
+  { id: "384x224", w: 384, h: 224, label: "384×224 · ~16:9 · balanced (projector)" },
+  { id: "384x384", w: 384, h: 384, label: "384×384 · 1:1 · balanced" },
+  { id: "448x256", w: 448, h: 256, label: "448×256 · ~16:9 · balanced (projector)" },
+  { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · max (projector)" },
+  { id: "512x512", w: 512, h: 512, label: "512×512 · 1:1 · max" },
 ];
 
 export function findOutputPreset(w: number, h: number): OutputPreset | undefined {
@@ -158,7 +161,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         // Fallback: round both to the nearest multiple of 16, clamp to sane
         // range. This keeps us valid even if a caller hands in a custom size.
         const snap = (n: number) =>
-          Math.max(128, Math.min(1024, Math.round(n / 16) * 16));
+          Math.max(112, Math.min(512, Math.round(n / 16) * 16));
         set({ outputWidth: snap(width), outputHeight: snap(h) });
       },
       setFrameRate: (value) =>
@@ -167,10 +170,11 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "vj0-ai-settings-storage",
-      version: 2,
+      version: 3,
       migrate: (persisted: unknown, version: number) => {
         // v0/v1 had: outputSize: number, promptPresets: string[]
         // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
+        // v3:       max output capped at 512×512 (768/1024 sizes removed for live perf)
         const s = (persisted as Record<string, unknown>) || {};
         const out: Record<string, unknown> = { ...s };
 
@@ -185,6 +189,16 @@ export const useAiSettingsStore = create<AiSettingsState>()(
               label: DEFAULT_PROMPT_PRESETS[i]?.label ?? `P${i + 1}`,
               prompt: p,
             }));
+          }
+        }
+
+        if (version < 3) {
+          // Clamp legacy oversized output to 512×288 (the new max-projector preset)
+          const w = typeof out.outputWidth === "number" ? out.outputWidth : 512;
+          const h = typeof out.outputHeight === "number" ? out.outputHeight : 288;
+          if (w > 512 || h > 512) {
+            out.outputWidth = 512;
+            out.outputHeight = 288;
           }
         }
 

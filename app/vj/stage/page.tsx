@@ -41,9 +41,14 @@ export default function StagePage() {
           const bitmap = await createImageBitmap(blob);
           const ctx = canvas.getContext("2d");
           if (!ctx) return;
-          if (canvas.width !== msg.width || canvas.height !== msg.height) {
-            canvas.width = msg.width;
-            canvas.height = msg.height;
+          // Use the bitmap's actual dimensions, not what the control tab claims —
+          // the server may still be returning its default size for the first few
+          // frames after a settings change, and we want to render those correctly
+          // (object-fit: contain in CSS handles letterboxing) instead of clipping
+          // a 512×512 frame into a 256×144 canvas.
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
           }
           // high = Lanczos/bicubic in modern browsers; low = bilinear
           ctx.imageSmoothingEnabled = upscaleMode !== "bilinear";
