@@ -17,7 +17,12 @@ import {
   AI_BACKEND_URLS,
   AI_BACKEND_LABELS,
   type AiBackend,
+  type UpscaleMode,
 } from "@/src/lib/stores/ai-settings-store";
+import {
+  openStageChannel,
+  type StageMsg,
+} from "@/src/lib/ai/stage-channel";
 import type { AudioFeatures } from "@/src/lib/audio-features";
 import { WebRtcAiTransport } from "@/src/lib/ai/webrtc-transport";
 import type {
@@ -127,6 +132,9 @@ export function VJApp() {
     seed: aiSeed,
     kleinAlpha: aiKleinAlpha,
     kleinSteps: aiKleinSteps,
+    upscaleMode: aiUpscaleMode,
+    hideUi: aiHideUi,
+    promptPresets: aiPromptPresets,
     setBackend: setAiBackend,
     setShowAi,
     setSendFrames: setAiSendFrames,
@@ -138,7 +146,111 @@ export function VJApp() {
     setSeed: setAiSeed,
     setKleinAlpha: setAiKleinAlpha,
     setKleinSteps: setAiKleinSteps,
+    setUpscaleMode: setAiUpscaleMode,
+    setHideUi: setAiHideUi,
   } = useAiSettingsStore();
+
+  // Prompt draft — user types freely; Enter commits to the store (and server).
+  // This avoids pushing a new prompt on every keystroke during live performance.
+  const [aiPromptDraft, setAiPromptDraft] = useState<string>(aiPrompt);
+  useEffect(() => {
+    // If the store prompt changes externally (hotkey, preset click), sync the
+    // draft so the input reflects it.
+    setAiPromptDraft(aiPrompt);
+  }, [aiPrompt]);
+  const aiPromptDirty = aiPromptDraft !== aiPrompt;
+
+  // BroadcastChannel to the /vj/stage tab — we publish every AI frame + prompt
+  // changes + transport status so the stage view can render fullscreen.
+  const stageChannelRef = useRef<BroadcastChannel | null>(null);
+  const stageFrameSeqRef = useRef<number>(0);
+  useEffect(() => {
+    const ch = openStageChannel();
+    stageChannelRef.current = ch;
+
+    // When the stage tab says "hello" (just opened), re-publish the current
+    // prompt so the overlay has something to show.
+    const onMessage = (ev: MessageEvent<StageMsg>) => {
+      if (ev.data?.type === "hello") {
+        ch?.postMessage({ type: "prompt", prompt: aiPrompt });
+      }
+    };
+    ch?.addEventListener("message", onMessage as EventListener);
+    return () => {
+      ch?.removeEventListener("message", onMessage as EventListener);
+      ch?.close();
+      stageChannelRef.current = null;
+    };
+  }, [aiPrompt]);
+
+  // Publish prompt whenever it changes (store-level, so after an Enter commit).
+  useEffect(() => {
+    stageChannelRef.current?.postMessage({ type: "prompt", prompt: aiPrompt });
+  }, [aiPrompt]);
+
+  // Global hotkeys for live performance. Skip when typing in input/textarea/select.
+  useEffect(() => {
+    const isTyping = () => {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      if (el.isContentEditable) return true;
+      return false;
+    };
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // leave OS shortcuts alone
+      if (isTyping()) return;
+
+      // 1..9 → preset prompt
+      if (/^[1-9]$/.test(e.key)) {
+        const idx = parseInt(e.key, 10) - 1;
+        const preset = aiPromptPresets[idx];
+        if (preset) {
+          setAiPrompt(preset);
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (e.key === " ") {
+        // Space → toggle send-frames (freeze / unfreeze the AI feed)
+        setAiSendFrames(!aiSendFrames);
+        e.preventDefault();
+        return;
+      }
+
+      if (e.key === "h" || e.key === "H") {
+        setAiHideUi(!aiHideUi);
+        e.preventDefault();
+        return;
+      }
+
+      if (aiBackend === "klein") {
+        if (e.key === "ArrowUp") {
+          setAiKleinAlpha(Math.round((aiKleinAlpha + 0.02) * 100) / 100);
+          e.preventDefault();
+        } else if (e.key === "ArrowDown") {
+          setAiKleinAlpha(Math.round((aiKleinAlpha - 0.02) * 100) / 100);
+          e.preventDefault();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    aiBackend,
+    aiHideUi,
+    aiKleinAlpha,
+    aiPromptPresets,
+    aiSendFrames,
+    setAiHideUi,
+    setAiKleinAlpha,
+    setAiPrompt,
+    setAiSendFrames,
+  ]);
 
   const [aiStatus, setAiStatus] = useState<AiTransportStatus>("idle");
   const [aiLogs, setAiLogs] = useState<string[]>([]);
@@ -396,7 +508,10 @@ export function VJApp() {
 
   // AI transport status + frame subscriptions
   useEffect(() => {
-    const handleStatus = (s: AiTransportStatus) => setAiStatus(s);
+    const handleStatus = (s: AiTransportStatus) => {
+      setAiStatus(s);
+      stageChannelRef.current?.postMessage({ type: "connection", status: s });
+    };
     aiTransport.onStatusChange(handleStatus);
 
     const handleFrame = (frame: AiIncomingFrame) => {
@@ -415,12 +530,27 @@ export function VJApp() {
         return;
       }
 
-      // Handle image blob
+      // Image blob: show locally + forward to stage tab (audience view).
       const url = URL.createObjectURL(frame.blob);
       setAiImageUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
         return url;
       });
+      // structured-clone the bytes into the channel (~10KB JPEG / frame)
+      frame.blob
+        .arrayBuffer()
+        .then((buf) => {
+          stageChannelRef.current?.postMessage({
+            type: "frame",
+            bytes: buf,
+            width: aiOutputSize,
+            height: aiOutputSize,
+            seq: ++stageFrameSeqRef.current,
+          });
+        })
+        .catch(() => {
+          /* ignore */
+        });
     };
 
     aiTransport.onFrame(handleFrame);
@@ -428,7 +558,7 @@ export function VJApp() {
       aiTransport.offFrame(handleFrame);
       aiTransport.offStatusChange(handleStatus);
     };
-  }, [aiTransport]);
+  }, [aiTransport, aiOutputSize]);
 
   // Revoke object URL on unmount
   useEffect(() => {
@@ -703,6 +833,39 @@ export function VJApp() {
 
   return (
     <div className="flex flex-col gap-4 w-full max-w-4xl mx-auto p-4">
+      {/* Hide-UI overlay: fullscreen AI output, sits on top when H is pressed.
+          Listeners (keydown, transport, frame loop) stay mounted in the tree
+          below so nothing reconnects. Click overlay or press H to exit. */}
+      {aiHideUi && (
+        <div
+          onClick={() => setAiHideUi(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 50,
+            background: "#000",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "none",
+          }}
+        >
+          {aiImageUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={aiImageUrl}
+              alt="AI output"
+              style={{
+                maxWidth: "100%",
+                maxHeight: "100%",
+                objectFit: "contain",
+                imageRendering: aiUpscaleMode === "bilinear" ? "auto" : "auto",
+              }}
+            />
+          )}
+        </div>
+      )}
+
       <StatusBar
         status={status}
         scenes={SCENES}
@@ -743,6 +906,12 @@ export function VJApp() {
                 src={aiImageUrl}
                 alt="AI generated output"
                 className="w-full h-full object-contain"
+                style={{
+                  // pixelated forces nearest-neighbor (crisp but blocky);
+                  // auto lets the browser use bicubic/Lanczos, which is what
+                  // we want for either quality mode.
+                  imageRendering: "auto",
+                }}
               />
             ) : (
               <div className="w-full h-full text-xs font-mono text-neutral-600 flex items-center justify-center">
@@ -822,16 +991,67 @@ export function VJApp() {
             </div>
           </div>
 
-          {/* Prompt input */}
+          {/* Prompt input — draft-based. Enter commits to the store (and server).
+              Hotkeys 1-9 also commit presets directly. */}
           <div className="flex flex-col gap-2">
-            <label className="text-xs font-mono text-neutral-500">AI Prompt</label>
-            <input
-              type="text"
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              className="w-full px-3 py-2 text-sm font-mono bg-black/50 border border-neutral-800 rounded text-neutral-200 placeholder-neutral-600 focus:border-emerald-900 focus:outline-none"
-              placeholder="Describe the visual style..."
-            />
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-mono text-neutral-500">AI Prompt</label>
+              <span
+                className={`text-[10px] font-mono ${
+                  aiPromptDirty ? "text-amber-400" : "text-neutral-600"
+                }`}
+              >
+                {aiPromptDirty ? "● unsaved — press Enter to send" : "✓ live"}
+              </span>
+            </div>
+            <div className="flex items-stretch gap-2">
+              <input
+                type="text"
+                value={aiPromptDraft}
+                onChange={(e) => setAiPromptDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    setAiPrompt(aiPromptDraft);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setAiPromptDraft(aiPrompt);
+                  }
+                }}
+                className="w-full px-3 py-2 text-sm font-mono bg-black/50 border border-neutral-800 rounded text-neutral-200 placeholder-neutral-600 focus:border-emerald-900 focus:outline-none"
+                placeholder="Describe the visual style, press Enter to send…"
+              />
+              <button
+                onClick={() => setAiPrompt(aiPromptDraft)}
+                disabled={!aiPromptDirty}
+                className="text-xs font-mono px-3 py-1 rounded border border-emerald-900 text-emerald-400 hover:bg-emerald-950/30 disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+                title="Enter"
+              >
+                Send ↵
+              </button>
+            </div>
+            {/* Preset chips (also bound to hotkeys 1-9) */}
+            <div className="flex flex-wrap gap-1 pt-1">
+              {aiPromptPresets.map((p, i) => {
+                const active = p === aiPrompt;
+                return (
+                  <button
+                    key={i}
+                    onClick={() => setAiPrompt(p)}
+                    className={`text-[10px] font-mono px-2 py-1 rounded border transition-colors ${
+                      active
+                        ? "border-emerald-700 bg-emerald-950/40 text-emerald-300"
+                        : "border-neutral-800 text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900/60"
+                    }`}
+                    title={p}
+                  >
+                    <span className="opacity-50 mr-1">{i + 1}</span>
+                    {p.slice(0, 32)}
+                    {p.length > 32 ? "…" : ""}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-4">
@@ -950,6 +1170,49 @@ export function VJApp() {
               </label>
             </div>
           )}
+
+          {/* Live-performance controls */}
+          <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-neutral-900">
+            <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-600">
+              Live
+            </div>
+            <label
+              className="flex items-center gap-2 text-xs font-mono text-neutral-400"
+              title="Interpolation when the AI output is scaled up for display. Lanczos (high) is sharper; Bilinear is softer."
+            >
+              Upscale:
+              <select
+                value={aiUpscaleMode}
+                onChange={(e) => setAiUpscaleMode(e.target.value as UpscaleMode)}
+                className="bg-black/50 border border-neutral-800 rounded px-2 py-1 text-neutral-200"
+              >
+                <option value="lanczos">Lanczos (sharp)</option>
+                <option value="bilinear">Bilinear (soft)</option>
+              </select>
+            </label>
+            <a
+              href="/vj/stage"
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs font-mono px-3 py-1 rounded border border-cyan-900 text-cyan-400 hover:bg-cyan-950/30 transition-colors"
+              title="Open the audience-only fullscreen output in a new tab. Drag it to your projector screen + press F11."
+            >
+              Open Stage ↗
+            </a>
+            <button
+              onClick={() => setAiHideUi(!aiHideUi)}
+              className="text-xs font-mono px-3 py-1 rounded border border-neutral-800 text-neutral-300 hover:bg-neutral-900/50 transition-colors"
+              title="Toggle a quick fullscreen-output mode on this tab (hotkey: H)"
+            >
+              {aiHideUi ? "Show UI (H)" : "Hide UI (H)"}
+            </button>
+            <div className="text-[10px] font-mono text-neutral-600 whitespace-nowrap">
+              keys: <span className="text-neutral-400">1-9</span> presets ·{" "}
+              <span className="text-neutral-400">Space</span> freeze ·{" "}
+              <span className="text-neutral-400">↑↓</span> alpha ·{" "}
+              <span className="text-neutral-400">H</span> hide UI
+            </div>
+          </div>
 
           <label className="flex items-center gap-2 text-xs font-mono text-neutral-400">
             <input

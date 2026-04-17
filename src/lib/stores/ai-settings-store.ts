@@ -15,6 +15,22 @@ export const AI_BACKEND_LABELS: Record<AiBackend, string> = {
   zimage: "Z-Image Turbo Nunchaku (img2img, ~17fps@256)",
 };
 
+export type UpscaleMode = "bilinear" | "lanczos";
+
+// Default 1-9 preset prompts, bound to number-key hotkeys in the VJ app.
+// Edit here and they'll update in the control panel.
+export const DEFAULT_PROMPT_PRESETS: string[] = [
+  "vibrant neon cyberpunk city street at night, rain, reflections, wide angle",
+  "aurora borealis over snowy mountains, green and purple sky, long exposure",
+  "spiral galaxy with pink and blue nebula, dust clouds, deep space, astrophotography",
+  "underwater caustics, sun rays piercing blue water, silhouettes of fish, dreamy",
+  "black ink dropping into water, slow motion, white background, macro photography",
+  "flames dancing in the dark, high speed photograph, black background",
+  "forest floor after rain, golden hour, moss and fungi, macro photograph",
+  "abstract oil paint swirling in water, vibrant colors, macro",
+  "bioluminescent jellyfish in deep ocean, dark blue background, ethereal, cinematic",
+];
+
 interface AiSettingsState {
   backend: AiBackend;
   showAi: boolean;
@@ -28,6 +44,10 @@ interface AiSettingsState {
   // Klein-specific
   kleinAlpha: number;   // 0..0.5 — how much the input biases composition (0 = pure t2i)
   kleinSteps: number;   // 1..4 — inference steps (2 = sweet spot, 4 = max quality)
+  // Live-performance UX
+  upscaleMode: UpscaleMode;       // display-time upscale quality in the output canvas
+  hideUi: boolean;                // H key: hide all panels, just show output
+  promptPresets: string[];        // bound to number keys 1-9
 
   setBackend: (value: AiBackend) => void;
   setShowAi: (value: boolean) => void;
@@ -40,6 +60,9 @@ interface AiSettingsState {
   setSeed: (value: number) => void;
   setKleinAlpha: (value: number) => void;
   setKleinSteps: (value: number) => void;
+  setUpscaleMode: (value: UpscaleMode) => void;
+  setHideUi: (value: boolean) => void;
+  setPromptPresets: (value: string[]) => void;
 }
 
 export const useAiSettingsStore = create<AiSettingsState>()(
@@ -56,12 +79,18 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       seed: 42,
       kleinAlpha: 0.10,
       kleinSteps: 2,
+      upscaleMode: "lanczos",
+      hideUi: false,
+      promptPresets: DEFAULT_PROMPT_PRESETS.slice(),
 
       setBackend: (value) => set({ backend: value }),
       setKleinAlpha: (value) =>
         set({ kleinAlpha: Math.max(0, Math.min(0.5, value)) }),
       setKleinSteps: (value) =>
         set({ kleinSteps: Math.max(1, Math.min(4, Math.round(value))) }),
+      setUpscaleMode: (value) => set({ upscaleMode: value }),
+      setHideUi: (value) => set({ hideUi: value }),
+      setPromptPresets: (value) => set({ promptPresets: value.slice(0, 9) }),
       setShowAi: (value) => set({ showAi: value }),
       setSendFrames: (value) => set({ sendFrames: value }),
       setShowCaptureDebug: (value) => set({ showCaptureDebug: value }),
