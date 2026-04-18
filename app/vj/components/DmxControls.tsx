@@ -8,7 +8,9 @@ interface DmxControlsProps {
 }
 
 /**
- * DMX connection controls - connect/disconnect buttons and status display.
+ * Single-button DMX action. Status itself is shown in the top SystemsBar
+ * already, so we don't repeat it here — the panel just needs whatever
+ * action is appropriate for the current state.
  */
 export function DmxControls({
   status,
@@ -16,49 +18,34 @@ export function DmxControls({
   onConnect,
   onDisconnect,
 }: DmxControlsProps) {
-  return (
-    <div className="flex items-center gap-4 mb-4">
-      <div className="flex items-center gap-2">
-        <span className="text-neutral-500">DMX:</span>
-        <span
-          className={`uppercase ${
-            status === "connected"
-              ? "text-emerald-400"
-              : status === "connecting"
-              ? "text-amber-400"
-              : status === "unsupported"
-              ? "text-red-400"
-              : "text-neutral-400"
-          }`}
-        >
-          {status}
-        </span>
+  if (!supported) {
+    return (
+      <div className="text-[10px] uppercase tracking-wider font-mono text-[color:var(--vj-error)]">
+        WebUSB unavailable
       </div>
+    );
+  }
 
-      {supported && status !== "connected" && (
-        <button
-          onClick={onConnect}
-          disabled={status === "connecting"}
-          className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-700 text-white rounded text-xs transition-colors"
-        >
-          Connect DMX
-        </button>
-      )}
+  if (status === "connected") {
+    return (
+      <button
+        onClick={onDisconnect}
+        className="vj-btn vj-btn--danger"
+        title="Release the USB device"
+      >
+        ✕ unpair
+      </button>
+    );
+  }
 
-      {status === "connected" && (
-        <button
-          onClick={onDisconnect}
-          className="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-xs transition-colors"
-        >
-          Disconnect
-        </button>
-      )}
-
-      {!supported && (
-        <span className="text-red-400 text-xs">
-          WebUSB not supported in this browser
-        </span>
-      )}
-    </div>
+  return (
+    <button
+      onClick={onConnect}
+      disabled={status === "connecting"}
+      className="vj-btn vj-btn--live"
+      title="Pair with a DMX USB device (browser will prompt)"
+    >
+      {status === "connecting" ? "scanning…" : "↻ pair dmx"}
+    </button>
   );
 }

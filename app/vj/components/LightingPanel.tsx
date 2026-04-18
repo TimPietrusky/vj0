@@ -60,24 +60,27 @@ export function LightingPanel({
   onFixtureRemove,
 }: LightingPanelProps) {
   return (
-    <div className="font-mono text-xs flex flex-col gap-3">
-      <DmxControls
-        status={dmxStatus}
-        supported={dmxSupported}
-        onConnect={onDmxConnect}
-        onDisconnect={onDmxDisconnect}
-      />
+    <div className="font-mono text-xs flex flex-col gap-2">
+      {/* Action row: pair button on the left, fixture profile picker on the
+          right. Status itself lives in the SystemsBar — don't repeat it. */}
+      <div className="grid grid-cols-[auto_1fr] gap-2 items-end">
+        <DmxControls
+          status={dmxStatus}
+          supported={dmxSupported}
+          onConnect={onDmxConnect}
+          onDisconnect={onDmxDisconnect}
+        />
+        <FixtureSelector
+          selectedProfileId={selectedProfileId}
+          onProfileSelect={onProfileSelect}
+          onAdd={onAddFixture}
+        />
+      </div>
 
-      <FixtureSelector
-        selectedProfileId={selectedProfileId}
-        onProfileSelect={onProfileSelect}
-        onAdd={onAddFixture}
-      />
-
-      <div className="space-y-4">
+      <div className="space-y-2">
         {fixtures.length === 0 ? (
-          <div className="text-neutral-500 text-center py-4">
-            No fixtures configured. Add one above.
+          <div className="text-[color:var(--vj-ink-dim)] text-center py-2 text-[11px] uppercase tracking-wider">
+            no fixtures yet — pick a profile and click + add
           </div>
         ) : (
           fixtures.map((fixture) => (

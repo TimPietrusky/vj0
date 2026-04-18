@@ -35,12 +35,20 @@ export class DmxOutput {
   }
 
   /**
-   * Get a previously paired USB device (if any)
+   * Find a previously paired USB device that matches one of our supported
+   * Arduino vendor/product combos. Filtering matters: this origin can have
+   * other unrelated paired devices, and `getDevices()[0]` would pick one of
+   * those at random — claimInterface(2) would then fail silently and the
+   * user sees "auto-connect doesn't work" with no obvious cause.
    */
   private async getPairedDevice(): Promise<USBDevice | undefined> {
     if (!DmxOutput.isSupported()) return undefined;
     const devices = await navigator.usb.getDevices();
-    return devices[0];
+    return devices.find((d) =>
+      USB_FILTERS.some(
+        (f) => f.vendorId === d.vendorId && f.productId === d.productId
+      )
+    );
   }
 
   /**
@@ -84,7 +92,11 @@ export class DmxOutput {
 
       await this.openDevice(device);
       return true;
-    } catch {
+    } catch (err) {
+      // Surface the failure — silent catches make "auto-connect doesn't work"
+      // impossible to diagnose. Common causes: another tab holds the USB
+      // claim, or the device disappeared mid-open.
+      console.warn("[DMX] autoConnect failed:", err);
       this.device = null;
       this.connected = false;
       return false;

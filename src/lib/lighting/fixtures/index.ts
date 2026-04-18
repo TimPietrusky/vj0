@@ -1,9 +1,11 @@
 import type { FixtureInstance, FixtureProfile } from "../types";
 import { SeParQuadRGBUV_6CH } from "./fun-gen-separ-quad";
 import { StairvilleWildWashPro648_6CH } from "./stairville-wild-wash-pro";
+import { StarvilleAF150_1CH } from "./starville-af-150";
 
 export { SeParQuadRGBUV_6CH } from "./fun-gen-separ-quad";
 export { StairvilleWildWashPro648_6CH } from "./stairville-wild-wash-pro";
+export { StarvilleAF150_1CH } from "./starville-af-150";
 
 /**
  * Available fixture profiles for the fixture selector
@@ -11,6 +13,7 @@ export { StairvilleWildWashPro648_6CH } from "./stairville-wild-wash-pro";
 export const FIXTURE_PROFILES: FixtureProfile[] = [
   SeParQuadRGBUV_6CH,
   StairvilleWildWashPro648_6CH,
+  StarvilleAF150_1CH,
 ];
 
 /**

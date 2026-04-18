@@ -87,6 +87,26 @@ interface AiSettingsState {
   hideUi: boolean;                // H key: hide all panels, just show output
   autoConnect: boolean;           // auto-connect to configured backend on app load
   promptPresets: PromptPreset[];  // bound to number keys 1-9
+  // Last-selected audio input device. Persisted so it survives reloads, and
+  // re-auto-selected when the device gets plugged in mid-session via the
+  // navigator.mediaDevices `devicechange` event listener in VJApp.
+  audioDeviceId: string;
+  // Visual scene currently driving the waveform canvas.
+  sceneId: string;
+  // Whether the Audio Features panel is expanded (also gates polling).
+  showAudioFeatures: boolean;
+  // Last-selected fixture profile in the Lighting card's "+ add" picker.
+  selectedFixtureProfileId: string;
+  // Stage-page FX. `stageSharpen` is the WebGL unsharp-mask strength
+  // (0 = off, ~1 = mild, ~5 = strong, 10 = aggressive). Clamped 0..10.
+  // Scanlines + vignette are CSS overlays matching the preview frame.
+  stageSharpen: number;
+  stageScanlines: boolean;
+  stageVignette: boolean;
+  // Manual fog intensity (0..255) used when the fog toggle is ON. The
+  // ON/OFF state itself is not persisted — reloads always start with fog
+  // off, which is the safer physical default for a 800 W heater.
+  fogIntensity: number;
 
   setBackend: (value: AiBackend) => void;
   setShowAi: (value: boolean) => void;
@@ -104,6 +124,14 @@ interface AiSettingsState {
   setAutoConnect: (value: boolean) => void;
   setPromptPresets: (value: PromptPreset[]) => void;
   updatePromptPreset: (index: number, preset: Partial<PromptPreset>) => void;
+  setAudioDeviceId: (value: string) => void;
+  setSceneId: (value: string) => void;
+  setShowAudioFeatures: (value: boolean) => void;
+  setSelectedFixtureProfileId: (value: string) => void;
+  setStageSharpen: (value: number) => void;
+  setStageScanlines: (value: boolean) => void;
+  setStageVignette: (value: boolean) => void;
+  setFogIntensity: (value: number) => void;
 }
 
 export const useAiSettingsStore = create<AiSettingsState>()(
@@ -125,7 +153,26 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       hideUi: false,
       autoConnect: false,
       promptPresets: DEFAULT_PROMPT_PRESETS.slice(),
+      audioDeviceId: "",
+      sceneId: "",
+      showAudioFeatures: true,
+      selectedFixtureProfileId: "",
+      stageSharpen: 0.6,
+      stageScanlines: true,
+      stageVignette: true,
+      fogIntensity: 255,
 
+      setAudioDeviceId: (value) => set({ audioDeviceId: value }),
+      setSceneId: (value) => set({ sceneId: value }),
+      setShowAudioFeatures: (value) => set({ showAudioFeatures: value }),
+      setSelectedFixtureProfileId: (value) =>
+        set({ selectedFixtureProfileId: value }),
+      setStageSharpen: (value) =>
+        set({ stageSharpen: Math.max(0, Math.min(10, value)) }),
+      setStageScanlines: (value) => set({ stageScanlines: value }),
+      setStageVignette: (value) => set({ stageVignette: value }),
+      setFogIntensity: (value) =>
+        set({ fogIntensity: Math.max(0, Math.min(255, Math.round(value))) }),
       setBackend: (value) => set({ backend: value }),
       setKleinAlpha: (value) =>
         set({ kleinAlpha: Math.max(0, Math.min(0.5, value)) }),
@@ -207,3 +254,18 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }
   )
 );
+
+// Cross-tab sync. Zustand's persist middleware writes to localStorage but
+// does NOT subscribe other tabs to those writes — so by default the
+// dashboard tab and the /vj/stage tab drift out of sync the moment you
+// touch a setting (e.g. moving the Stage FX → sharpen slider). The
+// `storage` event fires on every tab *except* the one that wrote, so we
+// rehydrate from the new value when our key changes. One-shot listener,
+// installed at module-load on the client only.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === "vj0-ai-settings-storage") {
+      void useAiSettingsStore.persist.rehydrate();
+    }
+  });
+}

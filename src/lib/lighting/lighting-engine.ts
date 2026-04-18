@@ -32,6 +32,13 @@ export class LightingEngine {
   // Reusable frame object to avoid allocations
   private frame: LightingFrame;
 
+  // Manual fog toggle. While fogActive is true, every fog-kind channel in
+  // the universe is forced to fogIntensity, regardless of the fixture's
+  // strobe/audio settings. setFogActive() flips the state; tick() just
+  // reads these without allocating.
+  private fogActive = false;
+  private fogIntensity = 0;
+
   constructor(
     canvas: HTMLCanvasElement,
     fixtures: FixtureInstance[],
@@ -52,6 +59,22 @@ export class LightingEngine {
   }
 
   /**
+   * Toggle or explicitly set the manual fog override. While active, every
+   * fog-kind channel is forced to `intensity`, regardless of that fixture's
+   * strobe/audio settings. `active = !wasActive` for a plain toggle from a
+   * hotkey; callers wanting a definite state pass `active` explicitly.
+   */
+  setFogActive(active: boolean, intensity: number): void {
+    this.fogActive = active;
+    this.fogIntensity = Math.max(0, Math.min(255, Math.round(intensity)));
+  }
+
+  /** Current state of the manual fog toggle. Used by the FogControl UI. */
+  isFogActive(): boolean {
+    return this.fogActive;
+  }
+
+  /**
    * Start the lighting update loop
    */
   start(): void {
@@ -59,6 +82,17 @@ export class LightingEngine {
 
     // Get 2D context for pixel sampling
     this.ctx = this.canvas.getContext("2d", { willReadFrequently: true });
+  }
+
+  /**
+   * Swap the source canvas the engine samples from. Used to flip lighting
+   * between the audio waveform (default) and the AI output preview when the
+   * AI backend is connected. Cheap — just rebinds the 2D context.
+   */
+  setSourceCanvas(canvas: HTMLCanvasElement): void {
+    if (canvas === this.canvas) return;
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!this.ctx) {
       console.error("LightingEngine: Failed to get 2D context");
       return;
@@ -260,6 +294,16 @@ export class LightingEngine {
           break;
         case "strobe":
           this.universe[chIndex] = strobeValue;
+          break;
+        case "fog":
+          // Fog machines expose a single output-intensity channel. The
+          // manual toggle (hotkey "0" / FOG button) takes priority while
+          // active; otherwise the strobe pipeline drives it: strobeMode
+          // "off" → no fog, "peak"/"energyLow"/etc. with threshold → fog
+          // bursts on drops, "rms" threshold 0 → continuous ambient fog.
+          this.universe[chIndex] = this.fogActive
+            ? this.fogIntensity
+            : strobeValue;
           break;
         default:
           // Ignore program/programSpeed for now

@@ -13,6 +13,7 @@ const CHANNEL_LABELS: Record<string, string> = {
   uv: "UV",
   dimmer: "DIM",
   strobe: "STR",
+  fog: "FOG",
   program: "PRG",
   programSpeed: "SPD",
 };
@@ -25,19 +26,21 @@ const CHANNEL_COLORS: Record<string, string> = {
   uv: "bg-violet-500",
   dimmer: "bg-amber-500",
   strobe: "bg-white",
+  fog: "bg-[color:var(--vj-info)]",
   program: "bg-neutral-500",
   programSpeed: "bg-neutral-500",
 };
 
-// Strobe mode options for the dropdown
 const STROBE_MODE_OPTIONS: { value: StrobeMode; label: string }[] = [
   { value: "off", label: "Off" },
-  { value: "energyLow", label: "Bass (Low)" },
+  { value: "energyLow", label: "Bass" },
   { value: "energyMid", label: "Mid" },
   { value: "energyHigh", label: "High" },
   { value: "peak", label: "Peak" },
   { value: "rms", label: "RMS" },
 ];
+
+const COLOR_CHANNEL_KINDS = new Set(["red", "green", "blue", "uv"]);
 
 interface FixtureInspectorProps {
   fixture: FixtureInstance;
@@ -53,8 +56,12 @@ interface FixtureInspectorProps {
 }
 
 /**
- * Fixture inspector component - shows fixture info, address control, and channel values.
- * Pure presentational - all state managed by parent.
+ * Compact fixture row. Uses vj-* design tokens and only renders sections
+ * that apply to the fixture's actual channels:
+ *   - Color controls only for fixtures with at least one RGB/UV channel
+ *     (so a single-channel fog machine doesn't get a useless color picker)
+ *   - Strobe controls only when the profile has a strobe-kind channel
+ * Everything else collapses so a minimal fixture is a compact row.
  */
 export function FixtureInspector({
   fixture,
@@ -70,6 +77,9 @@ export function FixtureInspector({
 }: FixtureInspectorProps) {
   const maxAddress = 512 - fixture.profile.channels.length + 1;
   const hasStrobe = fixture.profile.channels.includes("strobe");
+  const hasColor = fixture.profile.channels.some((k) =>
+    COLOR_CHANNEL_KINDS.has(k as string)
+  );
   const {
     address,
     strobeMode,
@@ -79,200 +89,208 @@ export function FixtureInspector({
     solidColor,
   } = fixture;
 
-  // Get RGB values for color preview
   const r = values?.[fixture.profile.channels.indexOf("red")] ?? 0;
   const g = values?.[fixture.profile.channels.indexOf("green")] ?? 0;
   const b = values?.[fixture.profile.channels.indexOf("blue")] ?? 0;
 
   return (
-    <div className="bg-neutral-800/50 rounded p-3">
-      {/* Header with profile selector and controls */}
-      <div className="flex items-center justify-between mb-3 gap-3">
-        <div className="flex items-center gap-3 flex-1">
+    <div className="rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)] p-2 flex flex-col gap-2 font-mono text-xs">
+      {/* Row 1 — profile, DMX address, remove. Single row, no labels. */}
+      <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
+        <select
+          value={fixture.profile.id}
+          onChange={(e) => onProfileChange(e.target.value)}
+          className="vj-input text-[11px]"
+          title="Fixture profile"
+        >
+          {FIXTURE_PROFILES.map((profile) => (
+            <option key={profile.id} value={profile.id}>
+              {profile.name}
+            </option>
+          ))}
+        </select>
+        <div
+          className="flex items-center gap-1"
+          title="DMX start address (1..512 minus channel count)"
+        >
+          <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+            ch
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={maxAddress}
+            value={address}
+            onChange={(e) =>
+              onAddressChange(parseInt(e.target.value, 10) || 1)
+            }
+            className="vj-input w-14 text-center tabular-nums"
+          />
+        </div>
+        <button
+          onClick={onRemove}
+          className="vj-btn vj-btn--danger"
+          title="Remove fixture"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Row 2 — color controls. Only shown for fixtures that have actual
+          colour channels. A fog machine's 1-channel profile skips this
+          entire row. */}
+      {hasColor && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+            color
+          </span>
+          <div className="inline-flex rounded border border-[color:var(--vj-edge-hot)] overflow-hidden">
+            <button
+              onClick={() => onColorModeChange("canvas")}
+              className={`px-2 py-0.5 text-[11px] uppercase tracking-wider transition-colors ${
+                colorMode === "canvas"
+                  ? "bg-[color:var(--vj-live)] text-black"
+                  : "bg-[color:var(--vj-bg)] text-[color:var(--vj-ink-dim)] hover:text-[color:var(--vj-info)]"
+              }`}
+            >
+              canvas
+            </button>
+            <button
+              onClick={() => onColorModeChange("solid")}
+              className={`px-2 py-0.5 text-[11px] uppercase tracking-wider transition-colors ${
+                colorMode === "solid"
+                  ? "bg-[color:var(--vj-live)] text-black"
+                  : "bg-[color:var(--vj-bg)] text-[color:var(--vj-ink-dim)] hover:text-[color:var(--vj-info)]"
+              }`}
+            >
+              solid
+            </button>
+          </div>
+          {colorMode === "solid" && (
+            <>
+              <input
+                type="color"
+                value={`#${solidColor.r
+                  .toString(16)
+                  .padStart(2, "0")}${solidColor.g
+                  .toString(16)
+                  .padStart(2, "0")}${solidColor.b
+                  .toString(16)
+                  .padStart(2, "0")}`}
+                onChange={(e) => {
+                  const hex = e.target.value;
+                  onSolidColorChange({
+                    r: parseInt(hex.slice(1, 3), 16),
+                    g: parseInt(hex.slice(3, 5), 16),
+                    b: parseInt(hex.slice(5, 7), 16),
+                  });
+                }}
+                className="w-6 h-6 rounded border border-[color:var(--vj-edge-hot)] cursor-pointer bg-transparent"
+              />
+              <span className="tabular-nums text-[10px] text-[color:var(--vj-ink-dim)]">
+                {solidColor.r},{solidColor.g},{solidColor.b}
+              </span>
+            </>
+          )}
+          {/* Live RGB preview — tiny swatch reflecting current output. */}
+          <div
+            className="ml-auto w-6 h-6 rounded border border-[color:var(--vj-edge-hot)]"
+            style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
+            title={`live rgb: ${r}, ${g}, ${b}`}
+          />
+        </div>
+      )}
+
+      {/* Row 3 — channel-value bars. Tight grid, auto-fit per fixture. */}
+      <div
+        className="grid gap-1.5"
+        style={{
+          gridTemplateColumns: `repeat(${fixture.profile.channels.length}, minmax(0, 1fr))`,
+        }}
+      >
+        {fixture.profile.channels.map((kind, i) => {
+          const value = values?.[i] ?? 0;
+          const label = CHANNEL_LABELS[kind] || kind;
+          const barColor = CHANNEL_COLORS[kind] || "bg-neutral-500";
+          return (
+            <div key={i} className="flex flex-col gap-0.5">
+              <div className="flex justify-between items-baseline text-[9px]">
+                <span className="text-[color:var(--vj-ink-dim)]">{label}</span>
+                <span className="tabular-nums text-[color:var(--vj-ink)]">
+                  {value}
+                </span>
+              </div>
+              <div className="h-1 bg-[color:var(--vj-bg)] rounded-full overflow-hidden">
+                <div
+                  className={`h-full ${barColor} transition-all duration-75`}
+                  style={{ width: `${(value / 255) * 100}%` }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Row 4 — audio-reactive strobe / fog-trigger controls. Only for
+          fixtures with a channel that hooks into the strobe pipeline
+          (strobe or fog — both read from strobeValue). */}
+      {(hasStrobe || fixture.profile.channels.includes("fog")) && (
+        <div className="grid grid-cols-3 gap-2 pt-1 border-t border-[color:var(--vj-edge)]">
           <select
-            value={fixture.profile.id}
-            onChange={(e) => onProfileChange(e.target.value)}
-            className="bg-neutral-900 border border-neutral-600 text-neutral-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
+            value={strobeMode}
+            onChange={(e) => onStrobeModeChange(e.target.value as StrobeMode)}
+            className="vj-input text-[11px]"
+            title="Audio feature that drives the strobe/fog channel"
           >
-            {FIXTURE_PROFILES.map((profile) => (
-              <option key={profile.id} value={profile.id}>
-                {profile.name}
+            {STROBE_MODE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
               </option>
             ))}
           </select>
-          <span className="text-neutral-500 text-xs">ID: {fixture.id}</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-neutral-500 text-xs">DMX:</span>
-            <input
-              type="number"
-              min={1}
-              max={maxAddress}
-              value={address}
-              onChange={(e) =>
-                onAddressChange(parseInt(e.target.value, 10) || 1)
-              }
-              className="w-14 bg-neutral-900 border border-neutral-600 text-neutral-200 text-xs rounded px-2 py-1 text-center focus:outline-none focus:border-emerald-500"
-            />
-          </div>
-          <button
-            onClick={onRemove}
-            className="px-2 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 rounded text-xs transition-colors"
-            title="Remove fixture"
-          >
-            Remove
-          </button>
-        </div>
-      </div>
-
-      {/* Color source controls */}
-      <div className="flex items-center gap-4 mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-neutral-500 text-xs">Color:</span>
-          <button
-            onClick={() => onColorModeChange("canvas")}
-            className={`px-2 py-1 text-xs rounded transition-colors ${
-              colorMode === "canvas"
-                ? "bg-emerald-600 text-white"
-                : "bg-neutral-700 text-neutral-400 hover:bg-neutral-600"
-            }`}
-          >
-            Canvas
-          </button>
-          <button
-            onClick={() => onColorModeChange("solid")}
-            className={`px-2 py-1 text-xs rounded transition-colors ${
-              colorMode === "solid"
-                ? "bg-emerald-600 text-white"
-                : "bg-neutral-700 text-neutral-400 hover:bg-neutral-600"
-            }`}
-          >
-            Solid
-          </button>
-        </div>
-
-        {colorMode === "solid" && (
-          <div className="flex items-center gap-2">
-            <input
-              type="color"
-              value={`#${solidColor.r
-                .toString(16)
-                .padStart(2, "0")}${solidColor.g
-                .toString(16)
-                .padStart(2, "0")}${solidColor.b
-                .toString(16)
-                .padStart(2, "0")}`}
-              onChange={(e) => {
-                const hex = e.target.value;
-                const r = parseInt(hex.slice(1, 3), 16);
-                const g = parseInt(hex.slice(3, 5), 16);
-                const b = parseInt(hex.slice(5, 7), 16);
-                onSolidColorChange({ r, g, b });
-              }}
-              className="w-8 h-6 rounded border border-neutral-600 cursor-pointer"
-            />
-            <span className="text-neutral-400 text-xs">
-              {solidColor.r}, {solidColor.g}, {solidColor.b}
+          <div className="flex items-center gap-1">
+            <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-8">
+              thr
             </span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={strobeThreshold * 100}
+              onChange={(e) =>
+                onStrobeThresholdChange(parseInt(e.target.value, 10) / 100)
+              }
+              className="vj-range flex-1"
+              style={
+                {
+                  ["--vj-range-fill" as string]: `${strobeThreshold * 100}%`,
+                } as React.CSSProperties
+              }
+              disabled={strobeMode === "off"}
+              title={`Trigger threshold: ${(strobeThreshold * 100).toFixed(0)}%`}
+            />
           </div>
-        )}
-      </div>
-
-      {/* Color preview and channel bars */}
-      <div className="flex gap-4 mb-3">
-        {/* RGB Color preview */}
-        <div
-          className="w-12 h-12 rounded border border-neutral-600 shrink-0"
-          style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
-          title={`RGB: ${r}, ${g}, ${b}`}
-        />
-
-        {/* Channel bars */}
-        <div className="flex-1 grid grid-cols-3 sm:grid-cols-6 gap-2">
-          {fixture.profile.channels.map((kind, i) => {
-            const value = values?.[i] ?? 0;
-            const label = CHANNEL_LABELS[kind] || kind;
-            const barColor = CHANNEL_COLORS[kind] || "bg-neutral-500";
-
-            return (
-              <div key={i} className="flex flex-col gap-1">
-                <div className="flex justify-between items-baseline">
-                  <span className="text-neutral-500">{label}</span>
-                  <span className="text-neutral-300">{value}</span>
-                </div>
-                <div className="h-1.5 bg-neutral-700 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full ${barColor} transition-all duration-75`}
-                    style={{ width: `${(value / 255) * 100}%` }}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Strobe controls - only show if fixture has strobe channel */}
-      {hasStrobe && (
-        <div className="border-t border-neutral-700 pt-3 mt-3">
-          <div className="text-neutral-400 text-xs uppercase tracking-wide mb-2">
-            Audio-Reactive Strobe
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            {/* Strobe mode selector */}
-            <div className="flex flex-col gap-1">
-              <label className="text-neutral-500 text-xs">Source</label>
-              <select
-                value={strobeMode}
-                onChange={(e) =>
-                  onStrobeModeChange(e.target.value as StrobeMode)
-                }
-                className="bg-neutral-900 border border-neutral-600 text-neutral-200 text-xs rounded px-2 py-1 focus:outline-none focus:border-emerald-500"
-              >
-                {STROBE_MODE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Threshold slider */}
-            <div className="flex flex-col gap-1">
-              <label className="text-neutral-500 text-xs">
-                Threshold: {(strobeThreshold * 100).toFixed(0)}%
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={strobeThreshold * 100}
-                onChange={(e) =>
-                  onStrobeThresholdChange(parseInt(e.target.value, 10) / 100)
-                }
-                className="w-full accent-emerald-500"
-                disabled={strobeMode === "off"}
-              />
-            </div>
-
-            {/* Max speed slider */}
-            <div className="flex flex-col gap-1">
-              <label className="text-neutral-500 text-xs">
-                Max Speed: {strobeMax}
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={255}
-                value={strobeMax}
-                onChange={(e) =>
-                  onStrobeMaxChange(parseInt(e.target.value, 10))
-                }
-                className="w-full accent-emerald-500"
-                disabled={strobeMode === "off"}
-              />
-            </div>
+          <div className="flex items-center gap-1">
+            <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-8">
+              max
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={255}
+              value={strobeMax}
+              onChange={(e) =>
+                onStrobeMaxChange(parseInt(e.target.value, 10))
+              }
+              className="vj-range flex-1"
+              style={
+                {
+                  ["--vj-range-fill" as string]: `${(strobeMax / 255) * 100}%`,
+                } as React.CSSProperties
+              }
+              disabled={strobeMode === "off"}
+              title={`Max DMX value: ${strobeMax}`}
+            />
           </div>
         </div>
       )}

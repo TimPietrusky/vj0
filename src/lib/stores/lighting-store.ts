@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type {
@@ -226,11 +227,20 @@ export const useLightingStore = create<LightingState>()(
 );
 
 /**
- * Hook to get deserialized fixtures
+ * Hook to get deserialized fixtures. Memoised against the serialised array
+ * identity so callers get the same FixtureInstance[] reference across
+ * unrelated renders — critical because VJApp's engine-recreation effect
+ * has `fixtures` in its deps, and a new reference on every render would
+ * recreate the LightingEngine every ~16 ms, nuking runtime state like the
+ * manual fog toggle before the user could see it take effect.
  */
 export function useFixtures(): FixtureInstance[] {
   const serialized = useLightingStore((state) => state.fixtures);
-  return serialized
-    .map(deserializeFixture)
-    .filter((f): f is FixtureInstance => f !== null);
+  return useMemo(
+    () =>
+      serialized
+        .map(deserializeFixture)
+        .filter((f): f is FixtureInstance => f !== null),
+    [serialized]
+  );
 }

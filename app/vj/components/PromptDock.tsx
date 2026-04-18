@@ -1,31 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PresetChips } from "./PresetChips";
-import type { PromptPreset } from "@/src/lib/stores/ai-settings-store";
 
 interface PromptDockProps {
   activePrompt: string;
   /** Commits the typed prompt as-is (Enter in input). */
   onSetPrompt: (p: string) => void;
-  /** Fires a preset (chip click). Typically also re-rolls the seed. */
-  onFirePreset?: (p: string) => void;
-  presets: PromptPreset[];
-  onUpdatePreset: (index: number, patch: Partial<PromptPreset>) => void;
 }
 
 /**
  * Prompt input with draft/live indicator, send button, and 1-9 preset chips.
  * Enter commits the draft. Escape reverts. Click a chip fires that preset.
  */
-export function PromptDock({
-  activePrompt,
-  onSetPrompt,
-  onFirePreset,
-  presets,
-  onUpdatePreset,
-}: PromptDockProps) {
-  const fire = onFirePreset ?? onSetPrompt;
+export function PromptDock({ activePrompt, onSetPrompt }: PromptDockProps) {
   const [draft, setDraft] = useState(activePrompt);
   useEffect(() => {
     setDraft(activePrompt);
@@ -73,12 +60,6 @@ export function PromptDock({
           Send ↵
         </button>
       </div>
-      <PresetChips
-        presets={presets}
-        activePrompt={activePrompt}
-        onFire={fire}
-        onEdit={onUpdatePreset}
-      />
     </div>
   );
 }

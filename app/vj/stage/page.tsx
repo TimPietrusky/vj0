@@ -5,21 +5,30 @@
  * Subscribes to the stage BroadcastChannel published by the /vj control tab.
  * Run /vj on your laptop (or iPad), drag this tab to the projector screen and
  * hit F11 to go fullscreen.
+ *
+ * Rendering: WebGL2 unsharp-mask sharpen pass (StageRenderer) brings back
+ * edge detail lost when bilinear-upscaling a small generated frame to a
+ * projector. CSS overlays add the matching scanline + vignette FX from the
+ * preview frame so the projector image has the same visual character as the
+ * control panel preview.
  */
 import { useEffect, useRef, useState } from "react";
 import { openStageChannel, type StageMsg } from "@/src/lib/ai/stage-channel";
 import { useAiSettingsStore } from "@/src/lib/stores";
+import {
+  StageRenderer,
+  type StageRendererHandle,
+} from "../components/StageRenderer";
 
 export default function StagePage() {
-  // Output canvas — we draw the received JPEG into a canvas so we can control
-  // the image smoothing quality (Lanczos vs bilinear) at display time.
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const rendererRef = useRef<StageRendererHandle>(null);
   const [hasSignal, setHasSignal] = useState(false);
   const [promptOverlay, setPromptOverlay] = useState<string>("");
   const overlayTimeoutRef = useRef<number | null>(null);
 
-  // Display-time upscale quality (synced from the store via localStorage)
-  const upscaleMode = useAiSettingsStore((s) => s.upscaleMode);
+  const sharpen = useAiSettingsStore((s) => s.stageSharpen);
+  const scanlines = useAiSettingsStore((s) => s.stageScanlines);
+  const vignette = useAiSettingsStore((s) => s.stageVignette);
 
   useEffect(() => {
     const ch = openStageChannel();
@@ -34,27 +43,10 @@ export default function StagePage() {
 
       if (msg.type === "frame") {
         setHasSignal(true);
-        const canvas = canvasRef.current;
-        if (!canvas) return;
         try {
           const blob = new Blob([msg.bytes], { type: "image/jpeg" });
           const bitmap = await createImageBitmap(blob);
-          const ctx = canvas.getContext("2d");
-          if (!ctx) return;
-          // Use the bitmap's actual dimensions, not what the control tab claims —
-          // the server may still be returning its default size for the first few
-          // frames after a settings change, and we want to render those correctly
-          // (object-fit: contain in CSS handles letterboxing) instead of clipping
-          // a 512×512 frame into a 256×144 canvas.
-          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-            canvas.width = bitmap.width;
-            canvas.height = bitmap.height;
-          }
-          // high = Lanczos/bicubic in modern browsers; low = bilinear
-          ctx.imageSmoothingEnabled = upscaleMode !== "bilinear";
-          ctx.imageSmoothingQuality =
-            upscaleMode === "lanczos" ? "high" : "low";
-          ctx.drawImage(bitmap, 0, 0);
+          rendererRef.current?.drawBitmap(bitmap);
           bitmap.close?.();
         } catch {
           // swallow — next frame will try again
@@ -79,7 +71,7 @@ export default function StagePage() {
       if (overlayTimeoutRef.current)
         window.clearTimeout(overlayTimeoutRef.current);
     };
-  }, [upscaleMode]);
+  }, []);
 
   return (
     <div
@@ -93,19 +85,42 @@ export default function StagePage() {
         cursor: "none",
       }}
     >
-      {/* Centered, contain-scaled output canvas. CSS scales pixels; the
-          imageSmoothing setting above controls the interpolation. */}
-      <canvas
-        ref={canvasRef}
+      <StageRenderer
+        ref={rendererRef}
+        sharpen={sharpen}
         style={{
           position: "absolute",
           inset: 0,
           width: "100%",
           height: "100%",
           objectFit: "contain",
-          imageRendering: upscaleMode === "bilinear" ? "auto" : "auto",
         }}
       />
+
+      {/* Scanlines + vignette FX overlay — same look as the preview frame so
+          the projector image has the same visual character. Both can be
+          toggled via the persisted prefs (default on). pointer-events: none
+          ensures clicks fall through (not that there's anything to click). */}
+      {(scanlines || vignette) && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            background: [
+              vignette
+                ? "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%)"
+                : null,
+              scanlines
+                ? "repeating-linear-gradient(to bottom, transparent 0px, transparent 2px, rgba(0,0,0,0.18) 3px, transparent 4px)"
+                : null,
+            ]
+              .filter(Boolean)
+              .join(", "),
+            mixBlendMode: "multiply",
+          }}
+        />
+      )}
 
       {/* Prompt reveal overlay — fades in for ~2.4s on prompt change */}
       <div
@@ -125,8 +140,7 @@ export default function StagePage() {
             "0 0 18px rgba(0,0,0,0.9), 0 1px 3px rgba(0,0,0,0.95)",
           opacity: promptOverlay ? 1 : 0,
           transform: promptOverlay ? "translateY(0)" : "translateY(8px)",
-          transition:
-            "opacity 380ms ease, transform 380ms ease",
+          transition: "opacity 380ms ease, transform 380ms ease",
         }}
       >
         {promptOverlay}

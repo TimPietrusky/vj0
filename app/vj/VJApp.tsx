@@ -40,8 +40,12 @@ import {
   LightingPanel,
   SystemsBar,
   PromptDock,
+  HotkeyBoard,
   Field,
   ResPicker,
+  StageRenderer,
+  type StageRendererHandle,
+  FogControl,
 } from "./components";
 
 type Status = "idle" | "requesting" | "running" | "error";
@@ -120,25 +124,32 @@ export function VJApp() {
   const aiAutoConnectSel = useAiSettingsStore((s) => s.autoConnect);
   useEffect(() => {
     if (!aiAutoConnectSel) return;
-    const t = window.setTimeout(() => {
-      if (!aiTransport.isConnected()) void aiTransport.start();
-    }, 120);
-    return () => window.clearTimeout(t);
+    if (!aiTransport.isConnected()) void aiTransport.start();
   }, [aiAutoConnectSel, aiTransport]);
 
   // UI state
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
-  const [currentSceneId, setCurrentSceneId] = useState<string>(SCENES[0].id);
+  const persistedDeviceId = useAiSettingsStore((s) => s.audioDeviceId);
+  const setPersistedDeviceId = useAiSettingsStore((s) => s.setAudioDeviceId);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>(persistedDeviceId);
+
+  // Persisted scene + audio-features-visible toggle. We keep currentSceneId
+  // as a derived selector because the VisualEngine internally tracks the
+  // active scene; the store value is the source of truth across reloads.
+  const persistedSceneId = useAiSettingsStore((s) => s.sceneId);
+  const setPersistedSceneId = useAiSettingsStore((s) => s.setSceneId);
+  const initialSceneId = persistedSceneId || SCENES[0].id;
+  const [currentSceneId, setCurrentSceneId] = useState<string>(initialSceneId);
+
+  const showDebug = useAiSettingsStore((s) => s.showAudioFeatures);
+  const setShowDebug = useAiSettingsStore((s) => s.setShowAudioFeatures);
 
   // Debug panel state - throttled updates (100ms = ~10fps)
   const [debugFeatures, setDebugFeatures] = useState<AudioFeatures | null>(
     null
   );
-  // Audio features start visible — user wants the dashboard fully populated.
-  const [showDebug, setShowDebug] = useState<boolean>(true);
 
   // Remote AI (WebRTC) UI state
   const {
@@ -157,6 +168,10 @@ export function VJApp() {
     hideUi: aiHideUi,
     autoConnect: aiAutoConnect,
     promptPresets: aiPromptPresets,
+    stageSharpen: aiStageSharpen,
+    stageScanlines: aiStageScanlines,
+    stageVignette: aiStageVignette,
+    fogIntensity,
     setBackend: setAiBackend,
     setSendFrames: setAiSendFrames,
     setShowCaptureDebug: setAiShowCaptureDebug,
@@ -170,6 +185,10 @@ export function VJApp() {
     setUpscaleMode: setAiUpscaleMode,
     setHideUi: setAiHideUi,
     setAutoConnect: setAiAutoConnect,
+    setStageSharpen: setAiStageSharpen,
+    setStageScanlines: setAiStageScanlines,
+    setStageVignette: setAiStageVignette,
+    setFogIntensity,
     updatePromptPreset,
   } = useAiSettingsStore();
 
@@ -210,6 +229,51 @@ export function VJApp() {
     [setAiPrompt, setAiSeed]
   );
 
+  const fireRandomPreset = useCallback(() => {
+    // Pull presets fresh from the store so rapid Space presses always see
+    // the current list (e.g. right after the user edits a preset).
+    const presets = useAiSettingsStore.getState().promptPresets;
+    if (presets.length === 0) return;
+    const idx = Math.floor(Math.random() * presets.length);
+    firePreset(presets[idx].prompt);
+  }, [firePreset]);
+
+  // Klein α nudge — clamped 0..0.5, snapped to 2 decimals so the chip+slider
+  // display the value cleanly. Used by both keyboard arrows and the on-screen
+  // HotkeyBoard arrow caps. We pull the latest value from the store instead
+  // of closing over `aiKleinAlpha` so rapid keypresses (especially with key
+  // autorepeat held down) actually accumulate — the previous closure form
+  // dropped every press that happened before React rendered the next value.
+  const adjustAlpha = useCallback((delta: number) => {
+    const cur = useAiSettingsStore.getState().kleinAlpha;
+    useAiSettingsStore
+      .getState()
+      .setKleinAlpha(Math.round((cur + delta) * 100) / 100);
+  }, []);
+
+  // Toggle fog on/off. Reads current intensity fresh from the store at
+  // toggle time so the latest slider value applies when switching on. Also
+  // re-reads the engine's current state so repeated presses alternate
+  // reliably regardless of intermediate UI renders.
+  //
+  // Debounced at 150 ms because multiple event sources can target the same
+  // action in this codebase (physical "0" keydown, the HotkeyBoard cap's
+  // onClick, the FogControl button's onClick). In dev with React Strict
+  // Mode the keydown listener briefly registers twice during remount, and
+  // a single keypress would flip the toggle back to off. 150 ms is well
+  // below any realistic user intent for a fog heater.
+  const lastFogToggleRef = useRef(0);
+  const triggerFog = useCallback(() => {
+    const now = performance.now();
+    if (now - lastFogToggleRef.current < 150) return;
+    lastFogToggleRef.current = now;
+    const engine = lightingEngineRef.current;
+    if (!engine) return;
+    const wasActive = engine.isFogActive();
+    const s = useAiSettingsStore.getState();
+    engine.setFogActive(!wasActive, s.fogIntensity);
+  }, []);
+
   // Global hotkeys for live performance. Skip when typing in input/textarea/select.
   useEffect(() => {
     const isTyping = () => {
@@ -235,24 +299,40 @@ export function VJApp() {
         return;
       }
 
+      if (e.key === "0") {
+        triggerFog();
+        e.preventDefault();
+        return;
+      }
+
       if (e.key === " ") {
-        setAiSendFrames(!aiSendFrames);
+        // Roulette: pick a random preset and fire it (also re-rolls the seed).
+        // Stopping/starting generation is rarely needed mid-set; surfacing a
+        // surprise prompt on Space is far more useful for live work.
+        fireRandomPreset();
         e.preventDefault();
         return;
       }
 
       if (e.key === "h" || e.key === "H") {
-        setAiHideUi(!aiHideUi);
+        const s = useAiSettingsStore.getState();
+        s.setHideUi(!s.hideUi);
         e.preventDefault();
         return;
       }
 
       if (aiBackend === "klein") {
         if (e.key === "ArrowUp") {
-          setAiKleinAlpha(Math.round((aiKleinAlpha + 0.02) * 100) / 100);
+          adjustAlpha(0.02);
           e.preventDefault();
         } else if (e.key === "ArrowDown") {
-          setAiKleinAlpha(Math.round((aiKleinAlpha - 0.02) * 100) / 100);
+          adjustAlpha(-0.02);
+          e.preventDefault();
+        } else if (e.key === "ArrowRight") {
+          adjustAlpha(0.01);
+          e.preventDefault();
+        } else if (e.key === "ArrowLeft") {
+          adjustAlpha(-0.01);
           e.preventDefault();
         }
       }
@@ -263,13 +343,12 @@ export function VJApp() {
   }, [
     aiBackend,
     aiHideUi,
-    aiKleinAlpha,
     aiPromptPresets,
-    aiSendFrames,
     firePreset,
+    fireRandomPreset,
+    adjustAlpha,
+    triggerFog,
     setAiHideUi,
-    setAiKleinAlpha,
-    setAiSendFrames,
   ]);
 
   const [aiStatus, setAiStatus] = useState<AiTransportStatus>("idle");
@@ -283,8 +362,23 @@ export function VJApp() {
   const [fixtureValues, setFixtureValues] = useState<Map<string, Uint8Array>>(
     new Map()
   );
-  const [selectedProfileId, setSelectedProfileId] = useState<string>(
-    FIXTURE_PROFILES[0].id
+  const persistedProfileId = useAiSettingsStore(
+    (s) => s.selectedFixtureProfileId
+  );
+  const setPersistedProfileId = useAiSettingsStore(
+    (s) => s.setSelectedFixtureProfileId
+  );
+  const [selectedProfileId, setSelectedProfileIdLocal] = useState<string>(
+    persistedProfileId || FIXTURE_PROFILES[0].id
+  );
+  // Mirror to the persisted store on every change so the "+ add" picker
+  // remembers what the user last had selected across reloads.
+  const setSelectedProfileId = useCallback(
+    (value: string) => {
+      setSelectedProfileIdLocal(value);
+      setPersistedProfileId(value);
+    },
+    [setPersistedProfileId]
   );
 
   const fixtures = useFixtures();
@@ -404,6 +498,11 @@ export function VJApp() {
         lightingEngine.onFrame(handleLightingFrame);
         lightingEngine.onFrame(handleDmxFrame);
 
+        // Restore the persisted scene before starting so the first frame
+        // already runs the user's last-selected visualizer instead of the
+        // default. setSceneById is a no-op if the id no longer exists.
+        if (persistedSceneId) visualEngine.setSceneById(persistedSceneId);
+
         visualEngine.start();
         lightingEngine.start();
 
@@ -417,7 +516,7 @@ export function VJApp() {
         );
       }
     },
-    [fetchDevices, handleLightingFrame, handleDmxFrame, fixtures]
+    [fetchDevices, handleLightingFrame, handleDmxFrame, fixtures, persistedSceneId]
   );
 
   // ============================================================================
@@ -427,17 +526,22 @@ export function VJApp() {
   const handleDeviceChange = useCallback(
     (deviceId: string) => {
       setSelectedDeviceId(deviceId);
+      setPersistedDeviceId(deviceId);
       initAudio(deviceId || undefined);
     },
-    [initAudio]
+    [initAudio, setPersistedDeviceId]
   );
 
-  const handleSceneChange = useCallback((sceneId: string) => {
-    const engine = visualEngineRef.current;
-    if (engine && engine.setSceneById(sceneId)) {
-      setCurrentSceneId(sceneId);
-    }
-  }, []);
+  const handleSceneChange = useCallback(
+    (sceneId: string) => {
+      const engine = visualEngineRef.current;
+      if (engine && engine.setSceneById(sceneId)) {
+        setCurrentSceneId(sceneId);
+        setPersistedSceneId(sceneId);
+      }
+    },
+    [setPersistedSceneId]
+  );
 
   const handleDmxConnect = useCallback(async () => {
     if (!dmxOutputRef.current) {
@@ -574,6 +678,30 @@ export function VJApp() {
         .catch(() => {
           /* ignore */
         });
+
+      // Off-thread: decode the JPEG into an ImageBitmap. The single decoded
+      // bitmap drives both consumers in this branch — preview WebGL renderer
+      // (sharpened display) AND the 1×1 lighting source canvas (averaged
+      // colour for DMX). Fire-and-forget: if a decode is slow the next frame
+      // supersedes it. The bitmap is closed only after both consumers are
+      // done with it.
+      const aiSrc = aiSourceCanvasRef.current;
+      createImageBitmap(frame.blob)
+        .then((bitmap) => {
+          previewRendererRef.current?.drawBitmap(bitmap);
+          if (aiSrc) {
+            const ctx = aiSrc.getContext("2d", { willReadFrequently: true });
+            if (ctx) {
+              ctx.imageSmoothingEnabled = true;
+              ctx.imageSmoothingQuality = "low";
+              ctx.drawImage(bitmap, 0, 0, aiSrc.width, aiSrc.height);
+            }
+          }
+          bitmap.close?.();
+        })
+        .catch(() => {
+          /* swallow: stale frame, next one will retry */
+        });
     };
 
     aiTransport.onFrame(handleFrame);
@@ -589,8 +717,34 @@ export function VJApp() {
     };
   }, [aiImageUrl]);
 
-  const aiSettingsResumeTimeoutRef = useRef<number | null>(null);
   const aiDebugCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  // Dirty flag set by every settings change. The frame sender flushes it via
+  // sendText *immediately before* the next binary frame, guaranteeing the
+  // server applies new settings to that frame (not the one after). Without
+  // this, a frame sent in the same tick as a hotkey press races past the
+  // settings JSON and gets generated with the previous prompt/seed, so the
+  // user sees no change until the frame after next — feels like they have
+  // to press the key multiple times.
+  const pendingSettingsRef = useRef(false);
+
+  // Preview renderer — same WebGL2 sharpen pipeline as the stage page, so
+  // the dashboard preview reflects exactly what the projector will look
+  // like (sharpen + scanlines/vignette via the canvas-frame CSS overlay).
+  const previewRendererRef = useRef<StageRendererHandle>(null);
+
+  // Hidden 1×1 canvas that the LightingEngine samples when the AI backend
+  // is connected. Each AI frame is downscaled into it via createImageBitmap
+  // off the main thread, so the WebRTC frame path stays unblocked. Result:
+  // every fixture takes its colour from the average colour of the AI image
+  // — a "middle value" representative tint that follows whatever the model
+  // is generating, without per-fixture pixel reads against a large canvas.
+  const aiSourceCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  if (typeof document !== "undefined" && !aiSourceCanvasRef.current) {
+    const c = document.createElement("canvas");
+    c.width = 1;
+    c.height = 1;
+    aiSourceCanvasRef.current = c;
+  }
 
   const aiFrameSenderRef = useRef<{
     running: boolean;
@@ -685,6 +839,40 @@ export function VJApp() {
       return;
     }
 
+    // Flush pending settings RIGHT BEFORE the frame binary. DataChannel is
+    // ordered, so sendText → sendBinary in the same tick means the server
+    // processes settings, then the frame — guaranteeing this frame uses
+    // the new prompt/seed/alpha/resolution. Without this, a frame sent in
+    // the same tick as a hotkey press races past the settings JSON and
+    // gets generated with the old state, so the user sees no visible
+    // change until the frame after next (the "press it three times" bug).
+    if (pendingSettingsRef.current) {
+      pendingSettingsRef.current = false;
+      const s = useAiSettingsStore.getState();
+      const aspect = s.outputWidth / s.outputHeight;
+      const captureW =
+        aspect >= 1
+          ? s.captureSize
+          : Math.max(16, Math.round(s.captureSize * aspect));
+      const captureH =
+        aspect >= 1
+          ? Math.max(16, Math.round(s.captureSize / aspect))
+          : s.captureSize;
+      const payload: Record<string, unknown> = {
+        prompt: s.prompt,
+        seed: s.seed,
+        captureWidth: captureW,
+        captureHeight: captureH,
+        width: s.outputWidth,
+        height: s.outputHeight,
+      };
+      if (s.backend === "klein") {
+        payload.alpha = s.kleinAlpha;
+        payload.n_steps = s.kleinSteps;
+      }
+      aiTransport.sendText(JSON.stringify(payload));
+    }
+
     sender.pendingEncode = true;
     sender.captureCanvas.toBlob(
       (blob) => {
@@ -708,39 +896,39 @@ export function VJApp() {
   useEffect(() => {
     if (!aiTransport.isConnected()) return;
 
-    const sender = aiFrameSenderRef.current;
-
-    sender.running = false;
-    if (aiSettingsResumeTimeoutRef.current !== null) {
-      window.clearTimeout(aiSettingsResumeTimeoutRef.current);
-      aiSettingsResumeTimeoutRef.current = null;
+    // Mark settings dirty. The frame sender flushes this flag right before
+    // its next binary send, so every frame after a hotkey press is generated
+    // with the latest state. If the sender isn't currently running (generate
+    // is off, or no connection earlier in the render), flush immediately so
+    // the server still has up-to-date state for warmup / first-frame-after-
+    // connect / standalone prompt edits.
+    pendingSettingsRef.current = true;
+    if (!aiFrameSenderRef.current.running) {
+      pendingSettingsRef.current = false;
+      const s = useAiSettingsStore.getState();
+      const aspect = s.outputWidth / s.outputHeight;
+      const captureW =
+        aspect >= 1
+          ? s.captureSize
+          : Math.max(16, Math.round(s.captureSize * aspect));
+      const captureH =
+        aspect >= 1
+          ? Math.max(16, Math.round(s.captureSize / aspect))
+          : s.captureSize;
+      const payload: Record<string, unknown> = {
+        prompt: s.prompt,
+        seed: s.seed,
+        captureWidth: captureW,
+        captureHeight: captureH,
+        width: s.outputWidth,
+        height: s.outputHeight,
+      };
+      if (s.backend === "klein") {
+        payload.alpha = s.kleinAlpha;
+        payload.n_steps = s.kleinSteps;
+      }
+      aiTransport.sendText(JSON.stringify(payload));
     }
-    aiSettingsResumeTimeoutRef.current = window.setTimeout(() => {
-      aiSettingsResumeTimeoutRef.current = null;
-      if (!aiSendFrames || !aiTransport.isConnected()) return;
-      sender.running = true;
-      sender.lastFrameTime = 0;
-      requestAnimationFrame(aiFrameLoop);
-    }, 100);
-
-    const aspect = aiOutputWidth / aiOutputHeight;
-    const captureW =
-      aspect >= 1 ? aiCaptureSize : Math.max(16, Math.round(aiCaptureSize * aspect));
-    const captureH =
-      aspect >= 1 ? Math.max(16, Math.round(aiCaptureSize / aspect)) : aiCaptureSize;
-    const payload: Record<string, unknown> = {
-      prompt: aiPrompt,
-      seed: aiSeed,
-      captureWidth: captureW,
-      captureHeight: captureH,
-      width: aiOutputWidth,
-      height: aiOutputHeight,
-    };
-    if (aiBackend === "klein") {
-      payload.alpha = aiKleinAlpha;
-      payload.n_steps = aiKleinSteps;
-    }
-    aiTransport.sendText(JSON.stringify(payload));
   }, [
     aiBackend,
     aiPrompt,
@@ -751,8 +939,6 @@ export function VJApp() {
     aiKleinAlpha,
     aiKleinSteps,
     aiTransport,
-    aiSendFrames,
-    aiFrameLoop,
     // Re-fire when status flips to "connected" so the server picks up our
     // current resolution / seed / etc. instead of using its defaults.
     // Critical for auto-connect: settings can't push before the channel exists.
@@ -776,14 +962,6 @@ export function VJApp() {
       sender.running = false;
     };
   }, [aiSendFrames, aiShowCaptureDebug, aiStatus, aiFrameLoop, aiTransport]);
-
-  useEffect(() => {
-    return () => {
-      if (aiSettingsResumeTimeoutRef.current !== null) {
-        window.clearTimeout(aiSettingsResumeTimeoutRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (!showDebug) return;
@@ -810,12 +988,39 @@ export function VJApp() {
       if (!dmxOutputRef.current) {
         dmxOutputRef.current = new DmxOutput();
       }
+      // Skip if already connected — hotplug events can fire on every USB
+      // change, including unrelated devices, and we don't want to re-claim
+      // an interface we already hold.
+      if (dmxOutputRef.current.isConnected()) return;
+      setDmxStatus("connecting");
       const connected = await dmxOutputRef.current.autoConnect();
-      if (connected) {
-        setDmxStatus("connected");
+      setDmxStatus(connected ? "connected" : "disconnected");
+    };
+
+    // Initial attempt for already-paired devices.
+    tryAutoConnect();
+
+    // Hotplug: WebUSB fires `connect` when a paired device is plugged in
+    // (or its usbd re-enumerates). Re-running autoConnect picks it up
+    // without the user having to click anything. `disconnect` flips the
+    // status back so the UI reflects reality.
+    const usb = navigator.usb;
+    if (!usb?.addEventListener) return;
+    const onConnect = () => {
+      void tryAutoConnect();
+    };
+    const onDisconnect = () => {
+      const dmx = dmxOutputRef.current;
+      if (dmx && !dmx.isConnected()) {
+        setDmxStatus("disconnected");
       }
     };
-    tryAutoConnect();
+    usb.addEventListener("connect", onConnect);
+    usb.addEventListener("disconnect", onDisconnect);
+    return () => {
+      usb.removeEventListener("connect", onConnect);
+      usb.removeEventListener("disconnect", onDisconnect);
+    };
   }, []);
 
   useEffect(() => {
@@ -834,9 +1039,45 @@ export function VJApp() {
     }
   }, [fixtures, status, handleLightingFrame, handleDmxFrame]);
 
+  // Swap the LightingEngine's sample source when the AI backend connects /
+  // disconnects. While AI is connected we want fixtures to follow the
+  // generated frame's tint (via the 1×1 aiSourceCanvas); otherwise we sample
+  // the waveform canvas as before. Re-runs after fixtures change too, so a
+  // freshly recreated engine picks up the right source.
   useEffect(() => {
-    fetchDevices();
-    initAudio(undefined, fixtures);
+    const engine = lightingEngineRef.current;
+    if (!engine) return;
+    const useAi =
+      aiStatus === "connected" && aiSourceCanvasRef.current !== null;
+    const target = useAi
+      ? aiSourceCanvasRef.current!
+      : canvasRef.current;
+    if (target) engine.setSourceCanvas(target);
+  }, [aiStatus, fixtures]);
+
+  useEffect(() => {
+    // Probe enumerateDevices first so we can downgrade gracefully when the
+    // persisted device isn't currently connected. Otherwise getUserMedia's
+    // `{ exact: deviceId }` constraint would throw OverconstrainedError and
+    // we'd land in an error state on every reload until the user re-plugs.
+    // The hotplug effect below picks the persisted device up the moment it
+    // appears.
+    (async () => {
+      let initial = persistedDeviceId || undefined;
+      if (initial) {
+        try {
+          const all = await navigator.mediaDevices.enumerateDevices();
+          const found = all.some(
+            (d) => d.kind === "audioinput" && d.deviceId === initial
+          );
+          if (!found) initial = undefined;
+        } catch {
+          initial = undefined;
+        }
+      }
+      await initAudio(initial, fixtures);
+      fetchDevices();
+    })();
 
     return () => {
       lightingEngineRef.current?.stop();
@@ -847,6 +1088,38 @@ export function VJApp() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-select the persisted device when it (re)appears mid-session — e.g.
+  // the user plugs in their USB interface after the app was already open.
+  // Browser fires `devicechange` on connect/disconnect; we re-enumerate and
+  // switch over only if we're not already using that device, to avoid
+  // gratuitously restarting the audio graph on unrelated hotplug events.
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!md?.addEventListener) return;
+    const onChange = async () => {
+      try {
+        const all = await md.enumerateDevices();
+        const inputs = all.filter((d) => d.kind === "audioinput");
+        setDevices(
+          inputs.map((d) => ({
+            deviceId: d.deviceId,
+            label: d.label || `Microphone ${d.deviceId.slice(0, 8)}`,
+          }))
+        );
+        if (!persistedDeviceId) return;
+        const present = inputs.some((d) => d.deviceId === persistedDeviceId);
+        if (present && persistedDeviceId !== selectedDeviceId) {
+          setSelectedDeviceId(persistedDeviceId);
+          initAudio(persistedDeviceId);
+        }
+      } catch {
+        /* enumerateDevices can throw in private windows; nothing to do */
+      }
+    };
+    md.addEventListener("devicechange", onChange);
+    return () => md.removeEventListener("devicechange", onChange);
+  }, [persistedDeviceId, selectedDeviceId, initAudio]);
 
   // ============================================================================
   // Render
@@ -988,8 +1261,42 @@ export function VJApp() {
         {/* ============== CENTER COL: AI output + prompt ============== */}
         <section className="xl:col-span-5 flex flex-col gap-2 min-w-0">
           <div className="vj-panel p-2 flex flex-col gap-2 flex-1">
-            <div className="flex items-center justify-between gap-2">
-              <div className="vj-panel-title">AI Output</div>
+            {/* Toolbar — everything you actually touch while playing lives
+                directly above the picture: generate, resolution, klein alpha. */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="vj-panel-title mr-auto">AI Output</div>
+              {aiBackend === "klein" && (
+                <div
+                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)]"
+                  title="0 = pure prompt · 0.5 = waveform dominates · ↑/↓ to adjust"
+                >
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+                    α
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={0.5}
+                    step={0.01}
+                    value={aiKleinAlpha}
+                    onChange={(e) => setAiKleinAlpha(Number(e.target.value))}
+                    className="vj-range w-20"
+                    style={
+                      {
+                        ["--vj-range-fill" as string]: `${sliderFillPct}%`,
+                      } as React.CSSProperties
+                    }
+                  />
+                  <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-accent)] w-9 text-right">
+                    {aiKleinAlpha.toFixed(2)}
+                  </span>
+                </div>
+              )}
+              <ResPicker
+                width={aiOutputWidth}
+                height={aiOutputHeight}
+                onPick={setAiOutputSize}
+              />
               <button
                 type="button"
                 onClick={() => setAiSendFrames(!aiSendFrames)}
@@ -1005,50 +1312,46 @@ export function VJApp() {
               </button>
             </div>
 
-            {/* Hero output preview — honours aspect via object-contain. Capped
-                at a sensible max-height so a small generated res doesn't
-                stretch into a wall-sized blurry image. The aspectRatio +
-                max-height combo: height hits cap first, width derives from
-                aspect, mx-auto centres the resulting box. */}
+            {/* Preview fills the column width; height follows the configured
+                output aspect. The WebGL StageRenderer applies the same
+                sharpen pass that runs on /vj/stage, so what you see here is
+                what the projector sees (the .vj-canvas-frame ::after CSS
+                overlay supplies the matching scanline+vignette FX). The
+                placeholder text overlays the canvas until a frame arrives. */}
             <div
-              className="vj-canvas-frame flex items-center justify-center mx-auto"
+              className="vj-canvas-frame relative flex items-center justify-center w-full"
               style={{
                 aspectRatio: `${aiOutputWidth} / ${aiOutputHeight}`,
-                maxHeight: 320,
-                maxWidth: "100%",
-                width: "auto",
               }}
             >
-              {aiImageUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={aiImageUrl}
-                  alt="AI generated output"
-                  className="w-full h-full object-contain"
-                  style={{ imageRendering: "auto" }}
-                />
-              ) : (
-                <div className="text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4">
+              <StageRenderer
+                ref={previewRendererRef}
+                sharpen={aiStageSharpen}
+                className="w-full h-full"
+                style={{ objectFit: "contain" }}
+              />
+              {!aiImageUrl && (
+                <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
                   {aiStatus === "connected" ? (
-                    <>
+                    <span>
                       <span className="text-[color:var(--vj-info)]">
-                        Connected
+                        connected
                       </span>
                       <br />
-                      waiting for frames…
-                    </>
+                      press ▶ generate or hit space
+                    </span>
                   ) : aiStatus === "connecting" ? (
                     <span className="text-[color:var(--vj-info)]">
-                      Negotiating WebRTC…
+                      negotiating webrtc…
                     </span>
                   ) : (
-                    <>
-                      Connect AI backend
+                    <span>
+                      connect backend in
                       <br />
                       <span className="text-[color:var(--vj-accent)]">
-                        to preview output
+                        right panel ↗
                       </span>
-                    </>
+                    </span>
                   )}
                 </div>
               )}
@@ -1057,95 +1360,101 @@ export function VJApp() {
             <PromptDock
               activePrompt={aiPrompt}
               onSetPrompt={setAiPrompt}
-              onFirePreset={firePreset}
+            />
+
+            <HotkeyBoard
               presets={aiPromptPresets}
+              activePrompt={aiPrompt}
+              onFirePreset={firePreset}
               onUpdatePreset={updatePromptPreset}
+              onRandom={fireRandomPreset}
+              onHideUi={() => setAiHideUi(!aiHideUi)}
+              onFireFog={triggerFog}
+              alpha={aiBackend === "klein" ? aiKleinAlpha : undefined}
+              onAlphaDelta={
+                aiBackend === "klein" ? adjustAlpha : undefined
+              }
             />
           </div>
         </section>
 
         {/* ============== RIGHT COL: AI settings + lighting ============== */}
-        <aside className="xl:col-span-4 grid grid-cols-1 lg:grid-cols-2 gap-3 min-w-0 content-start">
-          {/* AI backend + connection */}
-          <div className="vj-panel p-2 flex flex-col gap-2 lg:col-span-2">
-            <div className="vj-panel-title">AI Backend</div>
-
-            <Field label="Model">
-              <select
-                value={aiBackend}
-                onChange={(e) => {
-                  void aiTransport.stop();
-                  setAiBackend(e.target.value as AiBackend);
-                }}
-                className="vj-input"
-                title={AI_BACKEND_LABELS[aiBackend]}
+        {/* ============== RIGHT COL: AI backend + Lighting ============== */}
+        <aside className="xl:col-span-4 flex flex-col gap-2 min-w-0">
+          {/* AI Backend — everything that connects to and configures the
+              model. Status + α slider live on the AI Output card; resolution
+              lives in the toolbar above the preview. What's left here is
+              connection wiring + per-frame params, in a dense 2-col grid. */}
+          <div className="vj-panel p-2 flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <div className="vj-panel-title mr-auto">AI Backend</div>
+              <label
+                className="flex items-center gap-1.5 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider"
+                title="Auto-connect on page load and on backend switch"
               >
-                {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
-                  <option key={k} value={k}>
-                    {AI_BACKEND_LABELS[k]}
-                  </option>
-                ))}
-              </select>
-            </Field>
-
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                onClick={() => void aiTransport.start()}
-                disabled={aiStatus === "connecting" || aiStatus === "connected"}
-                className="vj-btn vj-btn--live flex-1"
-                title="Open WebRTC channel to the AI backend"
-              >
-                {aiStatus === "connecting" ? "Connecting…" : "Connect"}
-              </button>
-              <button
-                onClick={() => void aiTransport.stop()}
-                disabled={aiStatus === "idle" || aiStatus === "disconnected"}
-                className="vj-btn vj-btn--danger flex-1"
-              >
-                Disconnect
-              </button>
+                <input
+                  type="checkbox"
+                  checked={aiAutoConnect}
+                  onChange={(e) => setAiAutoConnect(e.target.checked)}
+                  className="vj-check"
+                />
+                auto
+              </label>
+              {aiStatus === "connected" || aiStatus === "connecting" ? (
+                <button
+                  onClick={() => void aiTransport.stop()}
+                  className="vj-btn vj-btn--danger"
+                  title="Close the WebRTC channel"
+                >
+                  ✕ disconnect
+                </button>
+              ) : (
+                <button
+                  onClick={() => void aiTransport.start()}
+                  className="vj-btn vj-btn--live"
+                  title="Open WebRTC channel to the AI backend"
+                >
+                  ▶ connect
+                </button>
+              )}
             </div>
 
-            <label
-              className="flex items-center gap-2 text-[11px] font-mono text-[color:var(--vj-ink-dim)]"
-              title="Automatically connect to the selected backend on page load and on backend switch."
+            <select
+              value={aiBackend}
+              onChange={(e) => {
+                void aiTransport.stop();
+                setAiBackend(e.target.value as AiBackend);
+              }}
+              className="vj-input"
+              title={AI_BACKEND_LABELS[aiBackend]}
             >
-              <input
-                type="checkbox"
-                checked={aiAutoConnect}
-                onChange={(e) => setAiAutoConnect(e.target.checked)}
-                className="vj-check"
-              />
-              <span className="uppercase tracking-wider">Auto-connect</span>
-            </label>
-          </div>
+              {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
+                <option key={k} value={k}>
+                  {AI_BACKEND_LABELS[k]}
+                </option>
+              ))}
+            </select>
 
-          {/* Generation parameters */}
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="vj-panel-title">Generation</div>
-
+            {/* Per-frame params — two columns, dense. */}
             <div className="grid grid-cols-2 gap-2">
-              <Field
-                label="Capture"
-                hint={
-                  aiBackend === "klein"
-                    ? "For Klein best quality, match Capture to Output long side."
-                    : "Client capture resolution."
-                }
-              >
+              <Field label="Capture px">
                 <select
                   value={aiCaptureSize}
                   onChange={(e) => setAiCaptureSize(Number(e.target.value))}
                   className="vj-input"
+                  title={
+                    aiBackend === "klein"
+                      ? "Klein: match to output long side for best quality"
+                      : "Client capture resolution"
+                  }
                 >
-                  <option value={64}>64 px · fastest</option>
-                  <option value={128}>128 px</option>
-                  <option value={256}>256 px</option>
-                  <option value={512}>512 px</option>
+                  <option value={64}>64 · fastest</option>
+                  <option value={128}>128</option>
+                  <option value={256}>256</option>
+                  <option value={512}>512</option>
                 </select>
               </Field>
-
-              <Field label="Target FPS">
+              <Field label="Target fps">
                 <select
                   value={aiFrameRate}
                   onChange={(e) => setAiFrameRate(Number(e.target.value))}
@@ -1157,164 +1466,183 @@ export function VJApp() {
                   <option value={60}>60 fps</option>
                 </select>
               </Field>
-            </div>
 
-            <Field label="Output">
-              <ResPicker
-                width={aiOutputWidth}
-                height={aiOutputHeight}
-                onPick={setAiOutputSize}
-              />
-            </Field>
-
-            {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
-              <button
-                onClick={() => setAiCaptureSize(aiOutputLong)}
-                className="vj-btn vj-btn--accent self-start"
-                title={`Match capture to output long side (${aiOutputLong}) for sharper Klein results`}
-              >
-                Match capture → {aiOutputLong}
-              </button>
-            )}
-
-            <div className="grid grid-cols-[1fr_auto] gap-2 items-end">
               <Field label="Seed">
-                <input
-                  type="number"
-                  value={aiSeed}
-                  onChange={(e) =>
-                    setAiSeed(Math.max(0, Math.floor(Number(e.target.value))))
-                  }
-                  className="vj-input tabular-nums"
-                />
+                <div className="grid grid-cols-[1fr_auto] gap-1">
+                  <input
+                    type="number"
+                    value={aiSeed}
+                    onChange={(e) =>
+                      setAiSeed(Math.max(0, Math.floor(Number(e.target.value))))
+                    }
+                    className="vj-input tabular-nums"
+                  />
+                  <button
+                    onClick={() => setAiSeed(Math.floor(Math.random() * 1_000_000))}
+                    className="vj-btn"
+                    title="Randomize seed"
+                  >
+                    ⟲
+                  </button>
+                </div>
               </Field>
-              <button
-                onClick={() => setAiSeed(Math.floor(Math.random() * 1000000))}
-                className="vj-btn"
-                title="Randomize seed"
-              >
-                ⟲ Random
-              </button>
+              <Field label="Display upscale">
+                <select
+                  value={aiUpscaleMode}
+                  onChange={(e) => setAiUpscaleMode(e.target.value as UpscaleMode)}
+                  className="vj-input"
+                  title="Interpolation when the AI output is scaled up for display"
+                >
+                  <option value="lanczos">Lanczos (sharp)</option>
+                  <option value="bilinear">Bilinear (soft)</option>
+                </select>
+              </Field>
+
+              {aiBackend === "klein" && (
+                <Field label="Klein steps">
+                  <select
+                    value={aiKleinSteps}
+                    onChange={(e) => setAiKleinSteps(Number(e.target.value))}
+                    className="vj-input"
+                    title="Klein is distilled for 4 steps. 2 = sweet spot."
+                  >
+                    <option value={1}>1 · fastest</option>
+                    <option value={2}>2 · recommended</option>
+                    <option value={3}>3 · more detail</option>
+                    <option value={4}>4 · max quality</option>
+                  </select>
+                </Field>
+              )}
+              {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
+                <button
+                  onClick={() => setAiCaptureSize(aiOutputLong)}
+                  className="vj-btn vj-btn--accent self-end"
+                  title={`Match capture to output long side (${aiOutputLong}) for sharper Klein output`}
+                >
+                  match capture → {aiOutputLong}
+                </button>
+              )}
             </div>
 
-            <Field
-              label="Display upscale"
-              hint="Interpolation when the AI output is scaled up for display."
-            >
-              <select
-                value={aiUpscaleMode}
-                onChange={(e) => setAiUpscaleMode(e.target.value as UpscaleMode)}
-                className="vj-input"
-              >
-                <option value="lanczos">Lanczos (sharp)</option>
-                <option value="bilinear">Bilinear (soft)</option>
-              </select>
-            </Field>
-          </div>
-
-          {/* Klein-specific */}
-          {aiBackend === "klein" && (
-            <div className="vj-panel p-2 flex flex-col gap-2">
-              <div className="vj-panel-title">Klein Img2Img</div>
-
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-[color:var(--vj-ink-dim)]">
-                  <span>Alpha</span>
-                  <span className="tabular-nums text-[color:var(--vj-accent)]">
-                    {aiKleinAlpha.toFixed(2)}
-                  </span>
-                </div>
+            {/* Stage FX — applied on the /vj/stage page (not this preview).
+                Sharpen runs as a WebGL unsharp-mask pass; scanlines + vignette
+                are CSS overlays matching the preview frame's look. */}
+            <div className="border-t border-[color:var(--vj-edge)] pt-2 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="vj-panel-title">Stage FX</span>
+                <span className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
+                  applies on /vj/stage
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-16">
+                  sharpen
+                </span>
                 <input
                   type="range"
                   min={0}
-                  max={0.5}
-                  step={0.01}
-                  value={aiKleinAlpha}
-                  onChange={(e) => setAiKleinAlpha(Number(e.target.value))}
-                  className="vj-range w-full"
+                  max={10}
+                  step={0.1}
+                  value={aiStageSharpen}
+                  onChange={(e) => setAiStageSharpen(Number(e.target.value))}
+                  className="vj-range flex-1"
                   style={
                     {
-                      ["--vj-range-fill" as string]: `${sliderFillPct}%`,
+                      ["--vj-range-fill" as string]: `${(aiStageSharpen / 10) * 100}%`,
                     } as React.CSSProperties
                   }
-                  title="0 = pure prompt · 0.1 = subtle nudge · 0.2+ = waveform shapes composition · 0.3+ = waveform dominates"
+                  title="WebGL unsharp-mask strength (0 = off, ~1 mild, 10 = aggressive)"
                 />
-                <div className="flex justify-between text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-                  <span>prompt</span>
-                  <span>waveform</span>
-                </div>
+                <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right">
+                  {aiStageSharpen.toFixed(1)}
+                </span>
               </div>
-
-              <Field
-                label="Steps"
-                hint="Klein is distilled for 4 steps. 2 = sweet spot."
-              >
-                <select
-                  value={aiKleinSteps}
-                  onChange={(e) => setAiKleinSteps(Number(e.target.value))}
-                  className="vj-input"
-                >
-                  <option value={1}>1 · fastest</option>
-                  <option value={2}>2 · recommended</option>
-                  <option value={3}>3 · more detail</option>
-                  <option value={4}>4 · max quality</option>
-                </select>
-              </Field>
-            </div>
-          )}
-
-          {/* Debug capture preview + logs (collapsed by default) */}
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="vj-panel-title">Capture Debug</div>
-              <label className="flex items-center gap-2 text-[11px] font-mono text-[color:var(--vj-ink-dim)]">
-                <input
-                  type="checkbox"
-                  checked={aiShowCaptureDebug}
-                  onChange={(e) => setAiShowCaptureDebug(e.target.checked)}
-                  className="vj-check"
-                />
-                <span className="uppercase tracking-wider">On</span>
-              </label>
-            </div>
-            {aiShowCaptureDebug && (
-              <div className="flex flex-col gap-1 rounded border border-[color:var(--vj-edge-hot)] bg-black/50 p-2">
-                <div className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
-                  Sending: {aiCaptureSize} → {aiOutputWidth}×{aiOutputHeight}
-                </div>
-                <canvas
-                  ref={aiDebugCanvasRef}
-                  width={aiCaptureSize}
-                  height={aiCaptureSize}
-                  className="rounded bg-black self-center"
-                  style={{
-                    width: 160,
-                    height: (160 * aiOutputHeight) / aiOutputWidth,
-                    imageRendering: "pixelated",
-                  }}
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
+                  <input
+                    type="checkbox"
+                    checked={aiStageScanlines}
+                    onChange={(e) => setAiStageScanlines(e.target.checked)}
+                    className="vj-check"
+                  />
+                  scanlines
+                </label>
+                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
+                  <input
+                    type="checkbox"
+                    checked={aiStageVignette}
+                    onChange={(e) => setAiStageVignette(e.target.checked)}
+                    className="vj-check"
+                  />
+                  vignette
+                </label>
               </div>
-            )}
+            </div>
+
+            {/* Diagnostics live behind a disclosure so they don't crowd the
+                live-controls in the default view. */}
             <details className="text-xs">
               <summary className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] cursor-pointer hover:text-[color:var(--vj-info)]">
-                Logs ({aiLogs.length})
+                diagnostics ({aiLogs.length} log{aiLogs.length === 1 ? "" : "s"})
               </summary>
-              <div className="mt-2 max-h-28 overflow-auto font-mono text-[11px] text-[color:var(--vj-ink-dim)] bg-black/40 rounded p-2">
-                {aiLogs.length === 0 ? (
-                  <div className="opacity-50">(no messages)</div>
-                ) : (
-                  aiLogs.map((line, idx) => (
-                    <div key={idx} className="whitespace-pre-wrap">
-                      {line}
+              <div className="mt-2 flex flex-col gap-2">
+                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
+                  <input
+                    type="checkbox"
+                    checked={aiShowCaptureDebug}
+                    onChange={(e) => setAiShowCaptureDebug(e.target.checked)}
+                    className="vj-check"
+                  />
+                  show capture preview
+                </label>
+                {aiShowCaptureDebug && (
+                  <div className="flex flex-col gap-1 rounded border border-[color:var(--vj-edge-hot)] bg-black/50 p-2">
+                    <div className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
+                      sending {aiCaptureSize} → {aiOutputWidth}×{aiOutputHeight}
                     </div>
-                  ))
+                    <canvas
+                      ref={aiDebugCanvasRef}
+                      width={aiCaptureSize}
+                      height={aiCaptureSize}
+                      className="rounded bg-black self-center"
+                      style={{
+                        width: 160,
+                        height: (160 * aiOutputHeight) / aiOutputWidth,
+                        imageRendering: "pixelated",
+                      }}
+                    />
+                  </div>
                 )}
+                <div className="max-h-28 overflow-auto font-mono text-[11px] text-[color:var(--vj-ink-dim)] bg-black/40 rounded p-2">
+                  {aiLogs.length === 0 ? (
+                    <div className="opacity-50">(no messages)</div>
+                  ) : (
+                    aiLogs.map((line, idx) => (
+                      <div key={idx} className="whitespace-pre-wrap">
+                        {line}
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             </details>
           </div>
 
-          {/* Lighting panel — keep existing, dress the wrapper only */}
-          <div className="vj-panel p-2 flex flex-col gap-2 lg:col-span-2">
+          {/* Fog — own card so the toggle button + hotkey are one glance
+              away. Sits above the Lighting card because fog state is a live
+              cue and shouldn't be hidden inside a fixture list. */}
+          <FogControl
+            intensity={fogIntensity}
+            onSetIntensity={setFogIntensity}
+            onToggle={triggerFog}
+            isActive={() =>
+              lightingEngineRef.current?.isFogActive() ?? false
+            }
+          />
+
+          {/* Lighting / DMX — header status comes from the SystemsBar, so this
+              card jumps straight to the action: pair button + fixture list. */}
+          <div className="vj-panel p-2 flex flex-col gap-2">
             <div className="vj-panel-title">Lighting / DMX</div>
             <LightingPanel
               dmxStatus={dmxStatus}

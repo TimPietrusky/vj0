@@ -35,6 +35,7 @@ export type FixtureChannelKind =
   | "uv"
   | "dimmer"
   | "strobe"
+  | "fog"
   | "program"
   | "programSpeed";
 

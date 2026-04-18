@@ -7,7 +7,8 @@ interface FixtureSelectorProps {
 }
 
 /**
- * Fixture selector dropdown with add button.
+ * Compact fixture profile selector + add button. Uses vj-* tokens so it
+ * blends with the rest of the dashboard.
  */
 export function FixtureSelector({
   selectedProfileId,
@@ -15,12 +16,12 @@ export function FixtureSelector({
   onAdd,
 }: FixtureSelectorProps) {
   return (
-    <div className="flex items-center gap-3 mb-4 border-b border-neutral-700 pb-4">
-      <span className="text-neutral-500 text-xs">Add Fixture:</span>
+    <div className="grid grid-cols-[1fr_auto] gap-2 items-end">
       <select
         value={selectedProfileId}
         onChange={(e) => onProfileSelect(e.target.value)}
-        className="flex-1 bg-neutral-900 border border-neutral-600 text-neutral-200 text-xs rounded px-2 py-1.5 focus:outline-none focus:border-emerald-500"
+        className="vj-input"
+        title="Profile to use for the next added fixture"
       >
         {FIXTURE_PROFILES.map((profile) => (
           <option key={profile.id} value={profile.id}>
@@ -30,9 +31,10 @@ export function FixtureSelector({
       </select>
       <button
         onClick={onAdd}
-        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs transition-colors"
+        className="vj-btn vj-btn--accent"
+        title="Add a fixture using the selected profile"
       >
-        Add
+        + add
       </button>
     </div>
   );

@@ -107,10 +107,10 @@ export function SystemsBar({
         <div className="ml-auto flex items-center gap-2">
           <span
             className="text-[9px] text-[color:var(--vj-ink-dim)] normal-case tracking-normal hidden md:inline"
-            title="Hotkeys: 1-9 fire preset · Space toggle generate · ↑↓ klein alpha · H hide UI"
+            title="Hotkeys: 1-9 fire preset (re-rolls seed) · Space random preset (re-rolls seed) · ↑↓ klein alpha ±0.02 · ←→ klein alpha ±0.01 · H hide UI"
           >
             <span className="text-[color:var(--vj-info)]">1-9</span> presets ·{" "}
-            <span className="text-[color:var(--vj-info)]">Space</span> generate ·{" "}
+            <span className="text-[color:var(--vj-info)]">Space</span> random ·{" "}
             <span className="text-[color:var(--vj-info)]">H</span> hide
           </span>
           <a
