@@ -34,6 +34,7 @@ import type {
   LightingFrame,
   StrobeMode,
   ColorMode,
+  DimmerMode,
 } from "@/src/lib/lighting";
 import {
   AudioDebugPanel,
@@ -218,15 +219,52 @@ export function VJApp() {
     stageChannelRef.current?.postMessage({ type: "prompt", prompt: aiPrompt });
   }, [aiPrompt]);
 
-  // Firing a preset = swap prompt + re-roll seed. Hotkeys (1-9) and chip
-  // clicks share this so hammering the same preset gives fresh variations
-  // every time, and jumping between presets always re-inits the noise.
+  // Build + sendText the settings payload NOW, reading the latest values
+  // straight from the Zustand store. Zustand's set() is synchronous, so
+  // any state mutation immediately before calling this is already visible
+  // in getState(). We call this directly from hotkey / button handlers so
+  // the sendText happens in the same event tick as the user action — no
+  // React scheduler, no microtask, no requestAnimationFrame delay. That's
+  // the difference between "click did nothing, click again works" and
+  // "click registers instantly".
+  const flushSettingsNow = useCallback(() => {
+    if (!aiTransport.isConnected()) return;
+    const s = useAiSettingsStore.getState();
+    const aspect = s.outputWidth / s.outputHeight;
+    const captureW =
+      aspect >= 1
+        ? s.captureSize
+        : Math.max(16, Math.round(s.captureSize * aspect));
+    const captureH =
+      aspect >= 1
+        ? Math.max(16, Math.round(s.captureSize / aspect))
+        : s.captureSize;
+    const payload: Record<string, unknown> = {
+      prompt: s.prompt,
+      seed: s.seed,
+      captureWidth: captureW,
+      captureHeight: captureH,
+      width: s.outputWidth,
+      height: s.outputHeight,
+    };
+    if (s.backend === "klein") {
+      payload.alpha = s.kleinAlpha;
+      payload.n_steps = s.kleinSteps;
+    }
+    aiTransport.sendText(JSON.stringify(payload));
+  }, [aiTransport]);
+
+  // Firing a preset = swap prompt + re-roll seed + send the payload right
+  // now. Hotkeys (1-9) and chip clicks share this so hammering the same
+  // preset gives fresh variations every time, and jumping between presets
+  // always re-inits the noise.
   const firePreset = useCallback(
     (prompt: string) => {
       setAiPrompt(prompt);
       setAiSeed(Math.floor(Math.random() * 1_000_000));
+      flushSettingsNow();
     },
-    [setAiPrompt, setAiSeed]
+    [setAiPrompt, setAiSeed, flushSettingsNow]
   );
 
   const fireRandomPreset = useCallback(() => {
@@ -244,12 +282,16 @@ export function VJApp() {
   // of closing over `aiKleinAlpha` so rapid keypresses (especially with key
   // autorepeat held down) actually accumulate — the previous closure form
   // dropped every press that happened before React rendered the next value.
-  const adjustAlpha = useCallback((delta: number) => {
-    const cur = useAiSettingsStore.getState().kleinAlpha;
-    useAiSettingsStore
-      .getState()
-      .setKleinAlpha(Math.round((cur + delta) * 100) / 100);
-  }, []);
+  const adjustAlpha = useCallback(
+    (delta: number) => {
+      const cur = useAiSettingsStore.getState().kleinAlpha;
+      useAiSettingsStore
+        .getState()
+        .setKleinAlpha(Math.round((cur + delta) * 100) / 100);
+      flushSettingsNow();
+    },
+    [flushSettingsNow]
+  );
 
   // Toggle fog on/off. Reads current intensity fresh from the store at
   // toggle time so the latest slider value applies when switching on. Also
@@ -317,6 +359,7 @@ export function VJApp() {
       if (e.key === "h" || e.key === "H") {
         const s = useAiSettingsStore.getState();
         s.setHideUi(!s.hideUi);
+        // No flushSettingsNow — hide UI doesn't affect the generation payload.
         e.preventDefault();
         return;
       }
@@ -392,6 +435,8 @@ export function VJApp() {
     updateFixtureColorMode,
     updateFixtureSolidColor,
     updateFixtureProfile,
+    updateFixtureDimmerMode,
+    updateFixtureManualDimmer,
   } = useLightingStore();
 
   // Count fixtures currently putting out DMX — "active" = any channel > 0.
@@ -564,6 +609,14 @@ export function VJApp() {
     }
   }, []);
 
+  const handleDmxReconnect = useCallback(async () => {
+    const dmx = dmxOutputRef.current;
+    if (!dmx) return;
+    setDmxStatus("connecting");
+    const ok = await dmx.reconnect();
+    setDmxStatus(ok ? "connected" : "disconnected");
+  }, []);
+
   const handleFixtureAddressChange = useCallback(
     (fixtureId: string, newAddress: number) => {
       updateFixtureAddress(fixtureId, newAddress);
@@ -613,6 +666,22 @@ export function VJApp() {
       lightingEngineRef.current?.updateFixtureSolidColor(fixtureId, color);
     },
     [updateFixtureSolidColor]
+  );
+
+  const handleDimmerModeChange = useCallback(
+    (fixtureId: string, mode: DimmerMode) => {
+      updateFixtureDimmerMode(fixtureId, mode);
+      lightingEngineRef.current?.updateFixtureDimmerMode(fixtureId, mode);
+    },
+    [updateFixtureDimmerMode]
+  );
+
+  const handleManualDimmerChange = useCallback(
+    (fixtureId: string, value: number) => {
+      updateFixtureManualDimmer(fixtureId, value);
+      lightingEngineRef.current?.updateFixtureManualDimmer(fixtureId, value);
+    },
+    [updateFixtureManualDimmer]
   );
 
   const handleAddFixture = useCallback(() => {
@@ -718,14 +787,6 @@ export function VJApp() {
   }, [aiImageUrl]);
 
   const aiDebugCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  // Dirty flag set by every settings change. The frame sender flushes it via
-  // sendText *immediately before* the next binary frame, guaranteeing the
-  // server applies new settings to that frame (not the one after). Without
-  // this, a frame sent in the same tick as a hotkey press races past the
-  // settings JSON and gets generated with the previous prompt/seed, so the
-  // user sees no change until the frame after next — feels like they have
-  // to press the key multiple times.
-  const pendingSettingsRef = useRef(false);
 
   // Preview renderer — same WebGL2 sharpen pipeline as the stage page, so
   // the dashboard preview reflects exactly what the projector will look
@@ -839,40 +900,6 @@ export function VJApp() {
       return;
     }
 
-    // Flush pending settings RIGHT BEFORE the frame binary. DataChannel is
-    // ordered, so sendText → sendBinary in the same tick means the server
-    // processes settings, then the frame — guaranteeing this frame uses
-    // the new prompt/seed/alpha/resolution. Without this, a frame sent in
-    // the same tick as a hotkey press races past the settings JSON and
-    // gets generated with the old state, so the user sees no visible
-    // change until the frame after next (the "press it three times" bug).
-    if (pendingSettingsRef.current) {
-      pendingSettingsRef.current = false;
-      const s = useAiSettingsStore.getState();
-      const aspect = s.outputWidth / s.outputHeight;
-      const captureW =
-        aspect >= 1
-          ? s.captureSize
-          : Math.max(16, Math.round(s.captureSize * aspect));
-      const captureH =
-        aspect >= 1
-          ? Math.max(16, Math.round(s.captureSize / aspect))
-          : s.captureSize;
-      const payload: Record<string, unknown> = {
-        prompt: s.prompt,
-        seed: s.seed,
-        captureWidth: captureW,
-        captureHeight: captureH,
-        width: s.outputWidth,
-        height: s.outputHeight,
-      };
-      if (s.backend === "klein") {
-        payload.alpha = s.kleinAlpha;
-        payload.n_steps = s.kleinSteps;
-      }
-      aiTransport.sendText(JSON.stringify(payload));
-    }
-
     sender.pendingEncode = true;
     sender.captureCanvas.toBlob(
       (blob) => {
@@ -894,42 +921,14 @@ export function VJApp() {
   }, [aiTransport, aiCaptureSize, aiFrameRate, aiOutputWidth, aiOutputHeight]);
 
   useEffect(() => {
-    if (!aiTransport.isConnected()) return;
-
-    // Mark settings dirty. The frame sender flushes this flag right before
-    // its next binary send, so every frame after a hotkey press is generated
-    // with the latest state. If the sender isn't currently running (generate
-    // is off, or no connection earlier in the render), flush immediately so
-    // the server still has up-to-date state for warmup / first-frame-after-
-    // connect / standalone prompt edits.
-    pendingSettingsRef.current = true;
-    if (!aiFrameSenderRef.current.running) {
-      pendingSettingsRef.current = false;
-      const s = useAiSettingsStore.getState();
-      const aspect = s.outputWidth / s.outputHeight;
-      const captureW =
-        aspect >= 1
-          ? s.captureSize
-          : Math.max(16, Math.round(s.captureSize * aspect));
-      const captureH =
-        aspect >= 1
-          ? Math.max(16, Math.round(s.captureSize / aspect))
-          : s.captureSize;
-      const payload: Record<string, unknown> = {
-        prompt: s.prompt,
-        seed: s.seed,
-        captureWidth: captureW,
-        captureHeight: captureH,
-        width: s.outputWidth,
-        height: s.outputHeight,
-      };
-      if (s.backend === "klein") {
-        payload.alpha = s.kleinAlpha;
-        payload.n_steps = s.kleinSteps;
-      }
-      aiTransport.sendText(JSON.stringify(payload));
-    }
+    // Catch-all for non-hotkey state changes (slider drags, backend swap,
+    // resolution pick, etc.) that still need to sync to the server. Hotkey
+    // handlers send directly via flushSettingsNow, so by the time this
+    // effect runs for a hotkey the payload is already on the wire — this
+    // is the safety net for everything else.
+    flushSettingsNow();
   }, [
+    flushSettingsNow,
     aiBackend,
     aiPrompt,
     aiSeed,
@@ -1649,6 +1648,7 @@ export function VJApp() {
               dmxSupported={dmxSupported}
               onDmxConnect={handleDmxConnect}
               onDmxDisconnect={handleDmxDisconnect}
+              onDmxReconnect={handleDmxReconnect}
               selectedProfileId={selectedProfileId}
               onProfileSelect={setSelectedProfileId}
               onAddFixture={handleAddFixture}
@@ -1662,6 +1662,8 @@ export function VJApp() {
               onFixtureSolidColorChange={handleSolidColorChange}
               onFixtureProfileChange={handleFixtureProfileChange}
               onFixtureRemove={handleRemoveFixture}
+              onFixtureDimmerModeChange={handleDimmerModeChange}
+              onFixtureManualDimmerChange={handleManualDimmerChange}
             />
           </div>
         </aside>

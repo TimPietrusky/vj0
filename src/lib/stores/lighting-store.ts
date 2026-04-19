@@ -6,6 +6,7 @@ import type {
   FixtureProfile,
   StrobeMode,
   ColorMode,
+  DimmerMode,
 } from "../lighting/types";
 import { FIXTURE_PROFILES, DEFAULT_FIXTURES } from "../lighting/fixtures";
 
@@ -23,6 +24,10 @@ interface SerializedFixture {
   strobeMax: number;
   colorMode: ColorMode;
   solidColor: { r: number; g: number; b: number };
+  // Optional in the type so pre-existing persisted fixtures (without these
+  // fields) still load; deserialize fills in defaults ("auto", 255).
+  dimmerMode?: DimmerMode;
+  manualDimmer?: number;
 }
 
 interface LightingState {
@@ -41,6 +46,8 @@ interface LightingState {
     color: { r: number; g: number; b: number }
   ) => void;
   updateFixtureProfile: (id: string, profileId: string) => void;
+  updateFixtureDimmerMode: (id: string, mode: DimmerMode) => void;
+  updateFixtureManualDimmer: (id: string, value: number) => void;
 }
 
 /**
@@ -62,6 +69,10 @@ export function deserializeFixture(
     strobeMax: serialized.strobeMax,
     colorMode: serialized.colorMode,
     solidColor: serialized.solidColor,
+    // Back-fill dimmer fields with auto/full so fixtures saved before this
+    // feature existed keep their previous behaviour on load.
+    dimmerMode: serialized.dimmerMode ?? "auto",
+    manualDimmer: serialized.manualDimmer ?? 255,
   };
 }
 
@@ -79,6 +90,8 @@ function serializeFixture(fixture: FixtureInstance): SerializedFixture {
     strobeMax: fixture.strobeMax,
     colorMode: fixture.colorMode,
     solidColor: fixture.solidColor,
+    dimmerMode: fixture.dimmerMode,
+    manualDimmer: fixture.manualDimmer,
   };
 }
 
@@ -106,6 +119,8 @@ function createDefaultFixture(
     strobeMax: 200,
     colorMode: "canvas",
     solidColor: { r: 255, g: 255, b: 255 },
+    dimmerMode: "auto",
+    manualDimmer: 255,
   };
 }
 
@@ -217,6 +232,28 @@ export const useLightingStore = create<LightingState>()(
         set((state) => ({
           fixtures: state.fixtures.map((f) =>
             f.id === id ? { ...f, profileId } : f
+          ),
+        })),
+
+      updateFixtureDimmerMode: (id: string, mode: DimmerMode) =>
+        set((state) => ({
+          fixtures: state.fixtures.map((f) =>
+            f.id === id ? { ...f, dimmerMode: mode } : f
+          ),
+        })),
+
+      updateFixtureManualDimmer: (id: string, value: number) =>
+        set((state) => ({
+          fixtures: state.fixtures.map((f) =>
+            f.id === id
+              ? {
+                  ...f,
+                  manualDimmer: Math.max(
+                    0,
+                    Math.min(255, Math.round(value))
+                  ),
+                }
+              : f
           ),
         })),
     }),

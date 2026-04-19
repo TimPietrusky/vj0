@@ -31,6 +31,8 @@ export const DEFAULT_FIXTURES: FixtureInstance[] = [
     strobeMax: 200,
     colorMode: "canvas",
     solidColor: { r: 255, g: 255, b: 255 },
+    dimmerMode: "auto",
+    manualDimmer: 255,
   },
 ];
 

@@ -17,6 +17,11 @@ export type StrobeMode =
 // Color source mode
 export type ColorMode = "canvas" | "solid";
 
+// Dimmer control mode
+// - "auto"   : engine computes the dimmer (255 full-on, 0 during strobe blackout)
+// - "manual" : fixture's `manualDimmer` value is written to the dimmer channel
+export type DimmerMode = "auto" | "manual";
+
 // Frame emitted by the lighting engine
 export type LightingFrame = {
   universe: DmxUniverse;
@@ -99,4 +104,15 @@ export interface FixtureInstance {
    * RGB values 0-255
    */
   solidColor: { r: number; g: number; b: number };
+  /**
+   * Dimmer source mode. Default "auto" keeps existing behaviour: engine
+   * writes 255 to the dimmer channel, or 0 during strobe blackouts. Set
+   * to "manual" to take over — engine writes `manualDimmer` instead, and
+   * the user's slider drives the fixture brightness directly.
+   */
+  dimmerMode: DimmerMode;
+  /**
+   * Manual dimmer value (0-255), used when dimmerMode === "manual".
+   */
+  manualDimmer: number;
 }

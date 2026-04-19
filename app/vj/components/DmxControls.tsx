@@ -5,18 +5,25 @@ interface DmxControlsProps {
   supported: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  onReconnect: () => void;
 }
 
 /**
- * Single-button DMX action. Status itself is shown in the top SystemsBar
- * already, so we don't repeat it here — the panel just needs whatever
- * action is appropriate for the current state.
+ * DMX action buttons. Status itself is shown in the top SystemsBar, so we
+ * don't repeat it here. While connected we surface two actions:
+ *   - ↻ reconnect : close + re-open the same paired device (no browser
+ *                   prompt, fixes sleep/tab-conflict hangs without making
+ *                   the user re-pair)
+ *   - ✕ unpair    : actually release the device (requires re-pair to
+ *                   reconnect)
+ * While disconnected we show the pair button.
  */
 export function DmxControls({
   status,
   supported,
   onConnect,
   onDisconnect,
+  onReconnect,
 }: DmxControlsProps) {
   if (!supported) {
     return (
@@ -28,13 +35,22 @@ export function DmxControls({
 
   if (status === "connected") {
     return (
-      <button
-        onClick={onDisconnect}
-        className="vj-btn vj-btn--danger"
-        title="Release the USB device"
-      >
-        ✕ unpair
-      </button>
+      <div className="flex gap-1">
+        <button
+          onClick={onReconnect}
+          className="vj-btn"
+          title="Close and re-open the USB connection (no re-pair)"
+        >
+          ↻ reconnect
+        </button>
+        <button
+          onClick={onDisconnect}
+          className="vj-btn vj-btn--danger"
+          title="Release the USB device entirely (requires re-pair)"
+        >
+          ✕ unpair
+        </button>
+      </div>
     );
   }
 

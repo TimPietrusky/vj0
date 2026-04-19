@@ -14,6 +14,7 @@ import type {
   DmxUniverse,
   StrobeMode,
   ColorMode,
+  DimmerMode,
 } from "./types";
 
 type FrameCallback = (frame: LightingFrame) => void;
@@ -214,6 +215,23 @@ export class LightingEngine {
     }
   }
 
+  /** Switch a fixture between automatic and manual dimmer control. */
+  updateFixtureDimmerMode(id: string, mode: DimmerMode): void {
+    const fixture = this.fixtures.find((f) => f.id === id);
+    if (fixture) {
+      fixture.dimmerMode = mode;
+    }
+  }
+
+  /** Set the manual dimmer value (0-255). Takes effect immediately in
+   *  manual mode; ignored by the tick() while the fixture is in auto. */
+  updateFixtureManualDimmer(id: string, value: number): void {
+    const fixture = this.fixtures.find((f) => f.id === id);
+    if (fixture) {
+      fixture.manualDimmer = Math.max(0, Math.min(255, Math.round(value)));
+    }
+  }
+
   /**
    * Main tick: sample canvas, fill universe, emit frame
    */
@@ -266,9 +284,17 @@ export class LightingEngine {
     // Calculate strobe value from audio features
     const strobeValue = this.calculateStrobeValue(fixture, features);
 
-    // When strobe is active and value is 0, also set dimmer to 0 (fixture off)
-    const strobeActive = fixture.strobeMode !== "off";
-    const dimmerValue = strobeActive && strobeValue === 0 ? 0 : 255;
+    // Dimmer source resolution. In manual mode the user's slider wins
+    // unconditionally — strobe blackouts don't dim it because the user is
+    // explicitly asserting a brightness. In auto mode we keep the original
+    // behaviour (255 full on, 0 during strobe blackout windows).
+    let dimmerValue: number;
+    if (fixture.dimmerMode === "manual") {
+      dimmerValue = fixture.manualDimmer;
+    } else {
+      const strobeActive = fixture.strobeMode !== "off";
+      dimmerValue = strobeActive && strobeValue === 0 ? 0 : 255;
+    }
 
     for (let i = 0; i < fixture.profile.channels.length; i++) {
       const kind = fixture.profile.channels[i];

@@ -2,6 +2,7 @@ import type {
   FixtureInstance,
   StrobeMode,
   ColorMode,
+  DimmerMode,
 } from "@/src/lib/lighting";
 import { FIXTURE_PROFILES } from "@/src/lib/lighting";
 
@@ -53,6 +54,8 @@ interface FixtureInspectorProps {
   onSolidColorChange: (color: { r: number; g: number; b: number }) => void;
   onProfileChange: (profileId: string) => void;
   onRemove: () => void;
+  onDimmerModeChange: (mode: DimmerMode) => void;
+  onManualDimmerChange: (value: number) => void;
 }
 
 /**
@@ -74,9 +77,12 @@ export function FixtureInspector({
   onSolidColorChange,
   onProfileChange,
   onRemove,
+  onDimmerModeChange,
+  onManualDimmerChange,
 }: FixtureInspectorProps) {
   const maxAddress = 512 - fixture.profile.channels.length + 1;
   const hasStrobe = fixture.profile.channels.includes("strobe");
+  const hasDimmer = fixture.profile.channels.includes("dimmer");
   const hasColor = fixture.profile.channels.some((k) =>
     COLOR_CHANNEL_KINDS.has(k as string)
   );
@@ -87,6 +93,8 @@ export function FixtureInspector({
     strobeMax,
     colorMode,
     solidColor,
+    dimmerMode,
+    manualDimmer,
   } = fixture;
 
   const r = values?.[fixture.profile.channels.indexOf("red")] ?? 0;
@@ -198,6 +206,63 @@ export function FixtureInspector({
             style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
             title={`live rgb: ${r}, ${g}, ${b}`}
           />
+        </div>
+      )}
+
+      {/* Dimmer row — only for fixtures that actually have a dimmer
+          channel. Auto (default) lets the engine compute the value (255
+          full-on, 0 during strobe blackouts). Manual lets the user pin
+          the brightness via the slider; strobe blackouts do NOT dim a
+          manually-driven fixture, since the user is asserting a level. */}
+      {hasDimmer && (
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+            dim
+          </span>
+          <div className="inline-flex rounded border border-[color:var(--vj-edge-hot)] overflow-hidden">
+            <button
+              onClick={() => onDimmerModeChange("auto")}
+              className={`px-2 py-0.5 text-[11px] uppercase tracking-wider transition-colors ${
+                dimmerMode === "auto"
+                  ? "bg-[color:var(--vj-live)] text-black"
+                  : "bg-[color:var(--vj-bg)] text-[color:var(--vj-ink-dim)] hover:text-[color:var(--vj-info)]"
+              }`}
+              title="Engine computes the dimmer (full-on, 0 during strobe blackout)"
+            >
+              auto
+            </button>
+            <button
+              onClick={() => onDimmerModeChange("manual")}
+              className={`px-2 py-0.5 text-[11px] uppercase tracking-wider transition-colors ${
+                dimmerMode === "manual"
+                  ? "bg-[color:var(--vj-live)] text-black"
+                  : "bg-[color:var(--vj-bg)] text-[color:var(--vj-ink-dim)] hover:text-[color:var(--vj-info)]"
+              }`}
+              title="User-controlled brightness (slider) — strobe blackouts don't apply"
+            >
+              manual
+            </button>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={255}
+            value={manualDimmer}
+            onChange={(e) =>
+              onManualDimmerChange(parseInt(e.target.value, 10))
+            }
+            className="vj-range flex-1"
+            style={
+              {
+                ["--vj-range-fill" as string]: `${(manualDimmer / 255) * 100}%`,
+              } as React.CSSProperties
+            }
+            disabled={dimmerMode !== "manual"}
+            title={`Manual dimmer: ${manualDimmer}`}
+          />
+          <span className="font-mono text-[10px] tabular-nums text-[color:var(--vj-info)] w-8 text-right">
+            {manualDimmer}
+          </span>
         </div>
       )}
 

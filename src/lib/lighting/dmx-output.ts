@@ -83,6 +83,22 @@ export class DmxOutput {
    * Automatically connect to a previously paired USB device
    * @returns true if connected, false if no paired device found
    */
+  /**
+   * Close the current USB claim and immediately re-open it against the same
+   * paired device. Useful when the device is still physically plugged in
+   * but its USB state got out of sync (host sleep, temporary enumeration
+   * glitch, another tab briefly holding the claim). No user prompt — the
+   * device stays paired and we just cycle the interface.
+   */
+  async reconnect(): Promise<boolean> {
+    try {
+      await this.disconnect();
+    } catch {
+      // disconnect is best-effort — if it throws we still try to re-open.
+    }
+    return this.autoConnect();
+  }
+
   async autoConnect(): Promise<boolean> {
     if (!DmxOutput.isSupported()) return false;
 

@@ -2,6 +2,7 @@ import type {
   FixtureInstance,
   StrobeMode,
   ColorMode,
+  DimmerMode,
 } from "@/src/lib/lighting";
 import { DmxControls } from "./DmxControls";
 import { FixtureSelector } from "./FixtureSelector";
@@ -15,6 +16,7 @@ interface LightingPanelProps {
   dmxSupported: boolean;
   onDmxConnect: () => void;
   onDmxDisconnect: () => void;
+  onDmxReconnect: () => void;
 
   // Fixture selector
   selectedProfileId: string;
@@ -35,6 +37,8 @@ interface LightingPanelProps {
   ) => void;
   onFixtureProfileChange: (id: string, profileId: string) => void;
   onFixtureRemove: (id: string) => void;
+  onFixtureDimmerModeChange: (id: string, mode: DimmerMode) => void;
+  onFixtureManualDimmerChange: (id: string, value: number) => void;
 }
 
 /**
@@ -45,6 +49,7 @@ export function LightingPanel({
   dmxSupported,
   onDmxConnect,
   onDmxDisconnect,
+  onDmxReconnect,
   selectedProfileId,
   onProfileSelect,
   onAddFixture,
@@ -58,6 +63,8 @@ export function LightingPanel({
   onFixtureSolidColorChange,
   onFixtureProfileChange,
   onFixtureRemove,
+  onFixtureDimmerModeChange,
+  onFixtureManualDimmerChange,
 }: LightingPanelProps) {
   return (
     <div className="font-mono text-xs flex flex-col gap-2">
@@ -69,6 +76,7 @@ export function LightingPanel({
           supported={dmxSupported}
           onConnect={onDmxConnect}
           onDisconnect={onDmxDisconnect}
+          onReconnect={onDmxReconnect}
         />
         <FixtureSelector
           selectedProfileId={selectedProfileId}
@@ -108,6 +116,12 @@ export function LightingPanel({
                 onFixtureProfileChange(fixture.id, profileId)
               }
               onRemove={() => onFixtureRemove(fixture.id)}
+              onDimmerModeChange={(mode) =>
+                onFixtureDimmerModeChange(fixture.id, mode)
+              }
+              onManualDimmerChange={(v) =>
+                onFixtureManualDimmerChange(fixture.id, v)
+              }
             />
           ))
         )}

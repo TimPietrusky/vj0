@@ -11,5 +11,10 @@ protobuf
 accelerate
 huggingface_hub
 transformers>=5.5.0
-git+https://github.com/huggingface/diffusers.git
+# Pinned to the exact commit installed on the production Klein pod. The pod
+# was running diffusers 0.38.0.dev0 from this SHA, verified via
+# dist-info/direct_url.json. Unpinning (= tracking main) reintroduces a
+# reproducibility hole: diffusers main moves faster than torch/accelerate
+# can stay compatible, so a fresh install can pull in a breaking change.
+git+https://github.com/huggingface/diffusers.git@160852de680d36117e0a787f7f8b718232539abb
 torchvision
