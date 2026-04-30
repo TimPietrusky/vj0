@@ -52,11 +52,16 @@ import {
 
 type Status = "idle" | "requesting" | "running" | "error";
 type DmxStatus = "disconnected" | "connecting" | "connected" | "unsupported";
+type AudioSource = "device" | "system";
 
 interface AudioDevice {
   deviceId: string;
   label: string;
 }
+
+// Sentinel deviceId value for the "🖥 System audio" entry in the audio input
+// dropdown. Picking it triggers getDisplayMedia instead of getUserMedia.
+const SYSTEM_AUDIO_VALUE = "__system__";
 
 /**
  * Main VJ application orchestrator.
@@ -136,6 +141,19 @@ export function VJApp() {
   const persistedDeviceId = useAiSettingsStore((s) => s.audioDeviceId);
   const setPersistedDeviceId = useAiSettingsStore((s) => s.setAudioDeviceId);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>(persistedDeviceId);
+  // Tracks whether we're currently fed by a microphone-style device or by a
+  // system-audio capture (getDisplayMedia). NOT persisted — getDisplayMedia
+  // requires a fresh user gesture each session anyway, so we always come back
+  // up on the persisted device after a reload.
+  const [audioSource, setAudioSource] = useState<AudioSource>("device");
+  // Whether the browser supports getDisplayMedia. Used to gate the System
+  // entry in the audio dropdown (Safari and older browsers don't have it).
+  const systemAudioSupported = useMemo(
+    () =>
+      typeof navigator !== "undefined" &&
+      typeof navigator.mediaDevices?.getDisplayMedia === "function",
+    []
+  );
 
   // Persisted scene + audio-features-visible toggle. We keep currentSceneId
   // as a derived selector because the VisualEngine internally tracks the
@@ -457,9 +475,10 @@ export function VJApp() {
   }, [fixtureValues]);
 
   const selectedDeviceLabel = useMemo(() => {
+    if (audioSource === "system") return "🖥 System audio";
     if (!selectedDeviceId) return devices[0]?.label;
     return devices.find((d) => d.deviceId === selectedDeviceId)?.label;
-  }, [selectedDeviceId, devices]);
+  }, [audioSource, selectedDeviceId, devices]);
 
   // ============================================================================
   // Device enumeration
@@ -518,7 +537,10 @@ export function VJApp() {
   // ============================================================================
 
   const initAudio = useCallback(
-    async (deviceId?: string, fixtureList?: FixtureInstance[]) => {
+    async (
+      source?: string | MediaStream,
+      fixtureList?: FixtureInstance[]
+    ) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
 
@@ -534,7 +556,7 @@ export function VJApp() {
 
       try {
         const audioEngine = new AudioEngine();
-        await audioEngine.init(deviceId);
+        await audioEngine.init(source);
         audioEngineRef.current = audioEngine;
 
         const visualEngine = new VisualEngine(canvas, audioEngine, SCENES);
@@ -576,13 +598,93 @@ export function VJApp() {
   // UI event handlers
   // ============================================================================
 
+  // System audio capture via getDisplayMedia. Browser shows its share-picker
+  // (tab / window / entire screen + an "include audio" checkbox); we keep
+  // only the audio track and feed it to AudioEngine. The Chromium-specific
+  // hints (`systemAudio`, `windowAudio`, `suppressLocalAudioPlayback`) tell
+  // Chrome we want clean, unmuted system audio — they're ignored on engines
+  // that don't recognise them, so the call still works on any browser that
+  // implements getDisplayMedia.
+  const initSystemAudio = useCallback(async () => {
+    try {
+      // Cast: TS lib.dom doesn't yet know `systemAudio` / `windowAudio` /
+      // `suppressLocalAudioPlayback` (Chromium proposal). They're real and
+      // documented; we just don't have types for them.
+      const constraints = {
+        video: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          suppressLocalAudioPlayback: false,
+        },
+        systemAudio: "include",
+        windowAudio: "system",
+      } as DisplayMediaStreamOptions;
+      const stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+
+      // Drop video — we asked for it because Chrome requires it, but we don't
+      // need it. Stop + remove so nothing else accidentally renders the
+      // preview thumbnail and we save a tiny bit of decode work.
+      for (const t of stream.getVideoTracks()) {
+        stream.removeTrack(t);
+        t.stop();
+      }
+
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        // User picked Share but didn't tick the audio checkbox in the picker.
+        stream.getTracks().forEach((t) => t.stop());
+        setStatus("error");
+        setErrorMessage(
+          "No audio in the shared source — re-share and check the audio box (browser only offers it for tabs and full screen)."
+        );
+        return;
+      }
+
+      // When the user clicks the browser's "Stop sharing" bar, the audio
+      // track ends. Auto-fall back to the persisted device so visuals don't
+      // go silent the moment they release the share.
+      const audioTrack = audioTracks[0];
+      audioTrack.addEventListener("ended", () => {
+        setSelectedDeviceId(persistedDeviceId);
+        setAudioSource("device");
+        initAudio(persistedDeviceId || undefined);
+      });
+
+      setSelectedDeviceId(SYSTEM_AUDIO_VALUE);
+      setAudioSource("system");
+      await initAudio(stream);
+    } catch (err) {
+      // NotAllowedError = user dismissed the picker. Quietly revert the
+      // dropdown without changing the running audio. Anything else is real.
+      if (err instanceof DOMException && err.name === "NotAllowedError") {
+        setSelectedDeviceId(persistedDeviceId);
+        return;
+      }
+      setStatus("error");
+      setErrorMessage(
+        err instanceof Error ? err.message : "System audio unavailable"
+      );
+    }
+  }, [initAudio, persistedDeviceId]);
+
   const handleDeviceChange = useCallback(
     (deviceId: string) => {
+      if (deviceId === SYSTEM_AUDIO_VALUE) {
+        // Don't persist the sentinel — getDisplayMedia must be re-triggered
+        // each session anyway. We update selectedDeviceId optimistically;
+        // initSystemAudio reverts it on cancel.
+        setSelectedDeviceId(SYSTEM_AUDIO_VALUE);
+        void initSystemAudio();
+        return;
+      }
+      setAudioSource("device");
       setSelectedDeviceId(deviceId);
       setPersistedDeviceId(deviceId);
       initAudio(deviceId || undefined);
     },
-    [initAudio, setPersistedDeviceId]
+    [initAudio, initSystemAudio, setPersistedDeviceId]
   );
 
   const handleSceneChange = useCallback(
@@ -1114,6 +1216,10 @@ export function VJApp() {
             label: d.label || `Microphone ${d.deviceId.slice(0, 8)}`,
           }))
         );
+        // Don't yank a live system-audio capture away just because the
+        // persisted USB mic appeared: the user explicitly chose to share
+        // system audio, hotplug events shouldn't override that.
+        if (audioSource === "system") return;
         if (!persistedDeviceId) return;
         const present = inputs.some((d) => d.deviceId === persistedDeviceId);
         if (present && persistedDeviceId !== selectedDeviceId) {
@@ -1126,7 +1232,7 @@ export function VJApp() {
     };
     md.addEventListener("devicechange", onChange);
     return () => md.removeEventListener("devicechange", onChange);
-  }, [persistedDeviceId, selectedDeviceId, initAudio]);
+  }, [persistedDeviceId, selectedDeviceId, audioSource, initAudio]);
 
   // ============================================================================
   // Render
@@ -1234,8 +1340,8 @@ export function VJApp() {
               <Field
                 label="Audio In"
                 hint={
-                  devices.length <= 1
-                    ? "Only one audio device detected"
+                  systemAudioSupported
+                    ? "Mic / line-in device, or 🖥 System audio (browser will prompt to share a tab/window/screen with audio)"
                     : "Pick which audio input drives the visuals"
                 }
               >
@@ -1243,8 +1349,12 @@ export function VJApp() {
                   value={selectedDeviceId}
                   onChange={(e) => handleDeviceChange(e.target.value)}
                   className="vj-input"
-                  disabled={devices.length <= 1}
                 >
+                  {systemAudioSupported && (
+                    <option value={SYSTEM_AUDIO_VALUE}>
+                      🖥 System audio (share screen/tab)
+                    </option>
+                  )}
                   <option value="">Default device</option>
                   {devices.map((d) => (
                     <option key={d.deviceId} value={d.deviceId}>

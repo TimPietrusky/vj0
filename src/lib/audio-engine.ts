@@ -28,23 +28,34 @@ export class AudioEngine {
   private latestFeatures: AudioFeatures | null = null;
 
   /**
-   * Initialize audio capture with optional device selection.
-   * Sets up both AnalyserNode (for waveform) and AudioWorklet (for features).
+   * Initialize audio capture from a microphone-style device or from a
+   * pre-existing MediaStream (e.g. a `getDisplayMedia` capture for system
+   * audio). Sets up both AnalyserNode (waveform) and AudioWorklet (features).
    *
-   * @param deviceId - Optional audio input device ID from enumerateDevices()
+   * @param source - Either an audio input device ID from enumerateDevices(),
+   *                 or a MediaStream that already carries an audio track.
+   *                 When omitted, the browser picks the default mic.
+   *                 When a MediaStream is given the engine takes ownership of
+   *                 it — destroy() will stop its tracks like any other.
    */
-  async init(deviceId?: string): Promise<void> {
-    // Request microphone access with processing disabled for raw signal
-    const constraints: MediaStreamConstraints = {
-      audio: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-      },
-    };
-
-    this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+  async init(source?: string | MediaStream): Promise<void> {
+    if (source instanceof MediaStream) {
+      // Caller already got the stream (e.g. system audio via getDisplayMedia).
+      // Just keep a reference; the audio graph below works on any stream that
+      // has at least one audio track.
+      this.mediaStream = source;
+    } else {
+      // Request microphone access with processing disabled for raw signal
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          deviceId: source ? { exact: source } : undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      };
+      this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+    }
 
     // Create AudioContext with low latency hint for real-time processing
     this.audioContext = new AudioContext({

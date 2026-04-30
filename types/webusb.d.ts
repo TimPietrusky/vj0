@@ -19,6 +19,10 @@ interface USB extends EventTarget {
 interface USBDevice {
   readonly vendorId: number;
   readonly productId: number;
+  readonly productName?: string;
+  readonly manufacturerName?: string;
+  readonly serialNumber?: string;
+  readonly configuration: { configurationValue: number } | null;
   open(): Promise<void>;
   close(): Promise<void>;
   selectConfiguration(configurationValue: number): Promise<void>;
