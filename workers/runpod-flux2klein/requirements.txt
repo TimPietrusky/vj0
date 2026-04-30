@@ -1,7 +1,14 @@
 # Pinned versions for the FLUX.2 Klein worker on RunPod 5090 / Blackwell sm_120.
 # Base image: runpod/pytorch:1.0.3-cu1281-torch291-ubuntu2404
-# Note: installing diffusers from main upgrades torch to 2.11.0+cu130 (auto)
-# Use `pip install --break-system-packages -r requirements.txt`. Do NOT install bitsandbytes.
+#
+# Install order matters — see setup.sh. In short:
+#   1) Install torch 2.11.0+cu128 from PyTorch's cu128 index FIRST. Driver 570
+#      hosts can't run cu130 wheels; cu128 is the safe choice. (BENCH-2026-04-30.md.)
+#   2) Then install everything in this requirements file with --break-system-packages.
+#   3) Then install torchao from the cu128 index (separately, like torch).
+#
+# Do NOT install bitsandbytes — it wants libnvJitLink.so.13 which isn't on
+# this image, and we don't use it anyway.
 
 numpy
 pillow

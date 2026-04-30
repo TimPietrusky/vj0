@@ -6,19 +6,27 @@ stdin/stdout JSON protocol — same shape as workers/runpod-stablefast/inference
 so workers/runpod-stablefast/server.js can drive it unchanged (just point INFERENCE_SCRIPT
 at this file).
 
-Winning config (see RESULTS.md for the full grind):
+Winning config (see BENCH-2026-04-30.md for the full grind; see RESULTS.md for the
+2-step lineage that this builds on):
   Flux2KleinKVPipeline + FLUX.2-small-decoder, bf16
+  + TorchAO Float8DynamicActivationFloat8WeightConfig on transformer linears
+    (skipping pe_embedder/norms/embeds — same filter shape as Pruna's smash_config)
   + torch.compile(transformer + vae.encoder + vae.decoder, mode="default")
+    (quantize_ MUST be applied before compile so kernels capture fp8 ops)
   + pre-encoded prompt embeds, max_seq_len=64
   + alpha-blend img2img: noisy = α·image_latents + (1-α)·noise
                          sigmas = linspace(1-α, 0, N_STEPS)
-  + 2 inference steps (3 for higher quality, 4 for max)
-  + alpha 0.05-0.15 (subtle SDXL-turbo-like input bias)
+  + 4 inference steps default (production quality target — flip to 2 for speed-first)
+  + alpha 0.05-0.18 (subtle SDXL-turbo-like input bias; up to 0.5 for hallucinated img2img)
 
-Per-frame latency (includes VAE encode of input):
-  256² / 2 steps ≈ 32 ms (31 fps)
-  384² / 2 steps ≈ 58 ms (17 fps)
-  512² / 2 steps ≈ 96 ms (10 fps)
+Per-frame latency on RTX 5090 (driver 580, includes VAE encode of input):
+  256² / 4 steps ≈ 38-45 ms (22-26 fps)   ← production target
+  384² / 4 steps ≈ 65-75 ms (13-15 fps)
+  512² / 4 steps ≈ 105-123 ms (8-10 fps)
+  256² / 2 steps ≈ 25-30 ms (33-40 fps)   ← speed-first preset
+  512² / 2 steps ≈ 75-100 ms (10-13 fps)
+
+VRAM ≈ 12.3 GB (vs 16 GB without fp8) — 3.7 GB freed for batched inference / bigger res.
 
 Protocol (JSON, one message per line):
   client → server:
@@ -59,11 +67,12 @@ DEFAULT_PROMPT = "vibrant neon cyberpunk city street at night, rain, reflections
 DEFAULT_WIDTH = 256
 DEFAULT_HEIGHT = 256
 DEFAULT_ALPHA = 0.10
-DEFAULT_N_STEPS = 2
+DEFAULT_N_STEPS = 4   # production quality target. Flip to 2 for the speed-first preset.
 DEFAULT_SEED = 42
 MAX_SEQ_LEN = 64
 JPEG_QUALITY = 80
 WARMUP_ITERS = 4
+USE_FP8 = True        # flip to False to disable fp8 quantization (debug only)
 
 
 # ---- output helpers (line-buffered JSON to stdout) ---- #
@@ -76,6 +85,17 @@ def log(text):
 
 
 # ---- pipeline setup ---- #
+def _fp8_filter(module, fqn):
+    """Quantize transformer linear layers only. Skip pe_embedder, norms, embeds —
+    same shape as Pruna's smash_config to keep precision-sensitive layers in bf16."""
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if "transformer" not in fqn and "single_transformer_blocks" not in fqn:
+        return False
+    bad = ("pe_embedder", "norm_", "_norm", "embed", "out_proj")
+    return not any(b in fqn.lower() for b in bad)
+
+
 def setup_pipeline():
     log(f"torch={torch.__version__} cuda={torch.version.cuda} "
         f"device={torch.cuda.get_device_name(0)} cap={torch.cuda.get_device_capability(0)}")
@@ -95,13 +115,34 @@ def setup_pipeline():
     log(f"loaded in {time.perf_counter()-t0:.1f}s, "
         f"vram={torch.cuda.memory_allocated()/1e9:.2f}GB")
 
+    if USE_FP8:
+        # MUST be applied BEFORE torch.compile so the compiler captures the
+        # fp8 ops in its kernel graph. See BENCH-2026-04-30.md Phase 3 for the
+        # 24-30% latency win this delivers on Blackwell sm_120.
+        log("applying TorchAO Float8DynamicActivationFloat8WeightConfig (PerRow) on transformer...")
+        try:
+            from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
+            from torchao.quantization.granularity import PerRow
+            try:
+                cfg = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())
+            except TypeError:
+                cfg = Float8DynamicActivationFloat8WeightConfig()
+            t_q = time.perf_counter()
+            quantize_(pipe.transformer, cfg, filter_fn=_fp8_filter)
+            log(f"fp8 applied in {time.perf_counter()-t_q:.1f}s, "
+                f"vram={torch.cuda.memory_allocated()/1e9:.2f}GB")
+        except Exception as e:
+            log(f"WARNING: fp8 quantization failed ({type(e).__name__}: {e}); "
+                f"continuing in bf16. Set USE_FP8=False to skip this attempt.")
+
     log("compiling transformer + vae.encoder + vae.decoder (mode=default)...")
     t1 = time.perf_counter()
     pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=False, dynamic=False)
     pipe.vae.encoder = torch.compile(pipe.vae.encoder, mode="default", fullgraph=False, dynamic=False)
     pipe.vae.decoder = torch.compile(pipe.vae.decoder, mode="default", fullgraph=False, dynamic=False)
     log(f"compile stubs registered in {time.perf_counter()-t1:.1f}s "
-        f"(actual JIT happens on first call per (height, width, steps) shape)")
+        f"(actual JIT happens on first call per (height, width, steps) shape; "
+        f"with fp8 expect ~80-160 s extra warmup at the first new resolution)")
 
     return pipe
 

@@ -1,16 +1,62 @@
 /**
- * WebRTC server with stable-fast inference integration.
- * Receives frames via WebRTC DataChannel, sends to Python inference, returns generated images.
+ * WebRTC server with FLUX.2 Klein img2img inference.
+ *
+ * Spawns N Python `inference_server.py` workers (one per GPU). Frame requests
+ * are round-robined; state changes (prompt/seed/resolution/etc.) are broadcast
+ * to every worker so they all stay in sync. Each worker is pinned to its own
+ * GPU via CUDA_VISIBLE_DEVICES.
+ *
+ * env vars:
+ *   PORT              — HTTP signaling port (default 3000)
+ *   INFERENCE_SCRIPT  — path to Python worker (default ./inference_server.py)
+ *   WORKER_COUNT      — number of inference workers; defaults to torch's
+ *                       cuda.device_count (auto-detected on startup; capped to 8).
+ *                       Set to "1" to force the legacy single-GPU behavior.
+ *   ICE_SERVERS_JSON  — STUN/TURN servers for WebRTC
+ *   ICE_GATHER_TIMEOUT_MS
  */
 const express = require("express");
 const wrtc = require("@roamhq/wrtc");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 
 const PORT = Number(process.env.PORT || 3000);
 const INFERENCE_SCRIPT = process.env.INFERENCE_SCRIPT || "./inference_server.py";
 const ICE_GATHER_TIMEOUT_MS = Number(process.env.ICE_GATHER_TIMEOUT_MS || 10000);
 
-// ICE server configuration
+// Auto-detect GPU count if WORKER_COUNT not set
+function detectGpuCount() {
+  if (process.env.WORKER_COUNT) {
+    const n = Number(process.env.WORKER_COUNT);
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, 8);
+  }
+  try {
+    const out = execSync("nvidia-smi --query-gpu=index --format=csv,noheader", {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    const n = out.trim().split("\n").filter(Boolean).length;
+    return Math.max(1, Math.min(n, 8));
+  } catch {
+    console.warn("nvidia-smi not available; defaulting to 1 worker");
+    return 1;
+  }
+}
+
+const WORKER_COUNT = detectGpuCount();
+
+// State-changing fields a client message may set on a worker. If a message
+// carries any of these, we broadcast that subset to ALL workers so they stay
+// in sync. Frame data (`image_base64`) is the only field that gets routed
+// round-robin to a single worker.
+const STATE_FIELDS = ["prompt", "seed", "alpha", "n_steps", "width", "height",
+                      "captureWidth", "captureHeight"];
+
+// Drop outbound frames if the WebRTC DataChannel buffer exceeds this many bytes.
+// Live VJ wants newest-wins; stale frames in flight clog the channel.
+// 1MB ≈ 30 frames of buffered output at 256² JPEG.
+const MAX_OUTBOUND_BUFFER = Number(process.env.MAX_OUTBOUND_BUFFER || 1024 * 1024);
+let droppedOutbound = 0;
+
 function getIceServers() {
   const raw = process.env.ICE_SERVERS_JSON;
   if (!raw) return [{ urls: "stun:stun.l.google.com:19302" }];
@@ -21,119 +67,219 @@ function getIceServers() {
   return [{ urls: "stun:stun.l.google.com:19302" }];
 }
 
-// State
+// ---------------- worker pool ---------------- //
+
+/** @type {Array<{proc: any, gpu: number, ready: boolean, stdoutBuf: string, framePending: number}>} */
+const workers = [];
+let roundRobinIdx = 0;
+
+function spawnWorker(gpu) {
+  console.log(`[worker ${gpu}] spawning (CUDA_VISIBLE_DEVICES=${gpu})`);
+  const env = { ...process.env, CUDA_VISIBLE_DEVICES: String(gpu), WORKER_ID: String(gpu) };
+  const proc = spawn("python3", [INFERENCE_SCRIPT], {
+    stdio: ["pipe", "pipe", "inherit"],
+    env,
+  });
+  const w = { proc, gpu, ready: false, stdoutBuf: "", framePending: 0 };
+  workers.push(w);
+
+  proc.stdout.on("data", (chunk) => {
+    w.stdoutBuf += chunk.toString();
+    let nl;
+    // Process complete lines only — frames are large base64 payloads,
+    // chunks may split mid-line.
+    while ((nl = w.stdoutBuf.indexOf("\n")) >= 0) {
+      const line = w.stdoutBuf.slice(0, nl);
+      w.stdoutBuf = w.stdoutBuf.slice(nl + 1);
+      if (!line) continue;
+      handleWorkerLine(w, line);
+    }
+  });
+
+  proc.on("close", (code) => {
+    console.log(`[worker ${gpu}] exited code=${code}`);
+    w.ready = false;
+  });
+
+  proc.on("error", (err) => {
+    console.error(`[worker ${gpu}] error:`, err);
+    w.ready = false;
+  });
+}
+
+function handleWorkerLine(w, line) {
+  let msg;
+  try { msg = JSON.parse(line); }
+  catch {
+    console.log(`[worker ${w.gpu} raw]`, line.slice(0, 200));
+    return;
+  }
+
+  if (msg.log) {
+    console.log(`[worker ${w.gpu}]`, msg.log);
+    return;
+  }
+  if (msg.status === "ready") {
+    console.log(`[worker ${w.gpu}] READY`);
+    w.ready = true;
+    flushPendingForWorker(w);
+    return;
+  }
+  if (msg.status === "frame") {
+    w.framePending = Math.max(0, w.framePending - 1);
+    w.framesProduced = (w.framesProduced || 0) + 1;
+    if (process.env.DEBUG_FRAMES) {
+      console.log(`[worker ${w.gpu}] frame ${w.framesProduced} ${msg.gen_time_ms}ms ${msg.width}x${msg.height}`);
+    }
+    // Drop frame if WebRTC channel is congested. Live VJ wants the freshest
+    // frame; stale frames in flight are useless and would wedge the channel.
+    if (activeChannel?.readyState === "open") {
+      const buffered = activeChannel.bufferedAmount || 0;
+      if (buffered > MAX_OUTBOUND_BUFFER) {
+        droppedOutbound++;
+        if (droppedOutbound % 10 === 1) {
+          console.log(`[dispatch] dropped frame from worker ${w.gpu} (channel buffer ${buffered} > ${MAX_OUTBOUND_BUFFER}; total dropped=${droppedOutbound})`);
+        }
+        return;
+      }
+      const imgBuffer = Buffer.from(msg.image_base64, "base64");
+      activeChannel.send(imgBuffer);
+      activeChannel.send(JSON.stringify({
+        type: "stats",
+        gen_time_ms: msg.gen_time_ms,
+        width: msg.width,
+        height: msg.height,
+        worker: w.gpu,
+      }));
+    }
+    return;
+  }
+  if (msg.status === "error") {
+    console.error(`[worker ${w.gpu} ERROR]`, msg.message);
+    return;
+  }
+  if (msg.status === "shutdown") {
+    console.log(`[worker ${w.gpu}] shutdown`);
+    w.ready = false;
+    return;
+  }
+}
+
+// Pending requests buffered until at least one worker is ready
+const pendingBootstrap = [];
+
+function flushPendingForWorker(w) {
+  if (pendingBootstrap.length === 0) return;
+  console.log(`[dispatch] flushing ${pendingBootstrap.length} pending requests`);
+  // On first-ready-worker, replay buffered state changes to all ready workers.
+  // Pending frames just get sent normally (we may lose a few that piled up
+  // during startup — that's OK, frames are idempotent).
+  const buf = pendingBootstrap.splice(0);
+  for (const r of buf) sendToInference(r);
+}
+
+function nextReadyWorker() {
+  if (workers.length === 0) return null;
+  const start = roundRobinIdx;
+  for (let i = 0; i < workers.length; i++) {
+    const w = workers[(start + i) % workers.length];
+    if (w.ready) {
+      roundRobinIdx = (start + i + 1) % workers.length;
+      return w;
+    }
+  }
+  return null;
+}
+
+function broadcastState(stateOnly) {
+  if (Object.keys(stateOnly).length === 0) return;
+  const line = JSON.stringify(stateOnly) + "\n";
+  for (const w of workers) {
+    if (w.ready) {
+      try { w.proc.stdin.write(line); }
+      catch (e) { console.error(`[worker ${w.gpu}] stdin write failed:`, e.message); }
+    }
+  }
+}
+
+function dispatchFrame(frameMsg) {
+  const w = nextReadyWorker();
+  if (!w) return false;
+  try {
+    const ok = w.proc.stdin.write(JSON.stringify(frameMsg) + "\n");
+    w.framePending++;
+    w.framesDispatched = (w.framesDispatched || 0) + 1;
+    if (process.env.DEBUG_FRAMES) {
+      console.log(`[dispatch] frame ${w.framesDispatched} → worker ${w.gpu} (pending=${w.framePending}${ok ? '' : ', backpressured'})`);
+    }
+    return true;
+  } catch (e) {
+    console.error(`[worker ${w.gpu}] stdin write failed:`, e.message);
+    w.ready = false;
+    return false;
+  }
+}
+
+// Public: send a client request through the dispatcher. Splits state vs frame.
+function sendToInference(req) {
+  if (!req || typeof req !== "object") return;
+
+  // Buffer until a worker is ready
+  if (!workers.some(w => w.ready)) {
+    pendingBootstrap.push(req);
+    return;
+  }
+
+  // Extract state fields. Broadcast to all workers so each stays in sync.
+  const stateOnly = {};
+  for (const k of STATE_FIELDS) {
+    if (k in req) stateOnly[k] = req[k];
+  }
+  if (Object.keys(stateOnly).length > 0) {
+    broadcastState(stateOnly);
+  }
+
+  if (req.image_base64) {
+    // Frame data — route to one worker round-robin.
+    // The state was already broadcast above, so we send frame-only to avoid
+    // redundant state updates eating stdin bandwidth.
+    const frameMsg = { image_base64: req.image_base64 };
+    dispatchFrame(frameMsg);
+  }
+}
+
+// Drop pending frames buffered before any worker was ready (used when
+// settings change to avoid stale frame replay).
+function clearPendingFrames() {
+  const before = pendingBootstrap.length;
+  for (let i = pendingBootstrap.length - 1; i >= 0; i--) {
+    if (pendingBootstrap[i].image_base64) pendingBootstrap.splice(i, 1);
+  }
+  const dropped = before - pendingBootstrap.length;
+  if (dropped > 0) console.log(`[dispatch] dropped ${dropped} pending frames (settings changed)`);
+}
+
+// ---------------- WebRTC layer (unchanged) ---------------- //
+
 let activePc = null;
 let activeChannel = null;
 let disconnectTimer = null;
-let inferenceProcess = null;
-let inferenceReady = false;
-let pendingRequests = [];
 
-// Start Python inference process
-function startInference() {
-  console.log("Starting inference process...");
-  
-  inferenceProcess = spawn("python3", [INFERENCE_SCRIPT], {
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-
-  inferenceProcess.stdout.on("data", (data) => {
-    const lines = data.toString().split("\n").filter(Boolean);
-    for (const line of lines) {
-      try {
-        const msg = JSON.parse(line);
-        
-        if (msg.log) {
-          console.log("[inference]", msg.log);
-        }
-        
-        if (msg.status === "ready") {
-          console.log("Inference ready!");
-          inferenceReady = true;
-          flushPendingRequests();
-        }
-        
-        if (msg.status === "frame" && activeChannel?.readyState === "open") {
-          // Send generated image back via WebRTC as binary
-          const imgBuffer = Buffer.from(msg.image_base64, "base64");
-          activeChannel.send(imgBuffer);
-          
-          // Also send generation time as text message
-          activeChannel.send(JSON.stringify({ 
-            type: "stats", 
-            gen_time_ms: msg.gen_time_ms,
-            width: msg.width,
-            height: msg.height
-          }));
-          console.log(`Frame sent: ${msg.gen_time_ms}ms (${msg.width}x${msg.height})`);
-        }
-        
-        if (msg.status === "error") {
-          console.error("[inference error]", msg.message);
-        }
-      } catch (e) {
-        console.log("[inference raw]", line);
-      }
-    }
-  });
-
-  inferenceProcess.on("close", (code) => {
-    console.log(`Inference process exited with code ${code}`);
-    inferenceReady = false;
-  });
-}
-
-// Send request to inference process
-function sendToInference(request) {
-  if (!inferenceProcess || !inferenceReady) {
-    console.log("Inference not ready, queuing request");
-    pendingRequests.push(request);
-    return;
-  }
-  inferenceProcess.stdin.write(JSON.stringify(request) + "\n");
-}
-
-// Flush pending requests when inference becomes ready
-function flushPendingRequests() {
-  if (pendingRequests.length > 0) {
-    console.log(`Flushing ${pendingRequests.length} pending requests`);
-    for (const request of pendingRequests) {
-      inferenceProcess.stdin.write(JSON.stringify(request) + "\n");
-    }
-    pendingRequests = [];
-  }
-}
-
-// Clear queue when new parameters arrive (to avoid old frames with stale settings)
-function clearPendingFrames() {
-  const oldLength = pendingRequests.length;
-  pendingRequests = pendingRequests.filter(req => !req.image_base64); // Keep non-frame requests
-  if (oldLength !== pendingRequests.length) {
-    console.log(`Cleared ${oldLength - pendingRequests.length} pending frames due to parameter change`);
-  }
-}
-
-// Close active WebRTC connection
 function closeActivePc() {
   if (disconnectTimer) {
     clearTimeout(disconnectTimer);
     disconnectTimer = null;
   }
   if (activeChannel) {
-    try {
-      activeChannel.close();
-    } catch {}
+    try { activeChannel.close(); } catch {}
     activeChannel = null;
   }
   if (activePc) {
-    try {
-      activePc.close();
-    } catch {}
+    try { activePc.close(); } catch {}
     activePc = null;
   }
 }
 
-// Wait for ICE gathering
 function waitForIceGatheringComplete(pc, timeoutMs) {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
   return new Promise((resolve) => {
@@ -145,32 +291,31 @@ function waitForIceGatheringComplete(pc, timeoutMs) {
       clearTimeout(timer);
       resolve();
     };
-    const onState = () => {
-      if (pc.iceGatheringState === "complete") finish();
-    };
+    const onState = () => { if (pc.iceGatheringState === "complete") finish(); };
     const timer = setTimeout(finish, timeoutMs);
     pc.addEventListener("icegatheringstatechange", onState);
   });
 }
 
-// Express app
 const app = express();
-
-// CORS - allow all origins for WebRTC signaling
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(200);
-  }
+  if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
-
 app.use(express.json({ limit: "10mb" }));
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, inferenceReady });
+  const readyCount = workers.filter(w => w.ready).length;
+  res.json({
+    ok: true,
+    workerCount: workers.length,
+    readyCount,
+    inferenceReady: readyCount > 0,
+    workers: workers.map(w => ({ gpu: w.gpu, ready: w.ready, framePending: w.framePending })),
+  });
 });
 
 app.post("/webrtc/offer", async (req, res) => {
@@ -179,9 +324,7 @@ app.post("/webrtc/offer", async (req, res) => {
   if (body?.sdp?.sdp && typeof body.sdp.sdp === "string") {
     const offerSdp = body.sdp.sdp;
     const lines = offerSdp.split("\n");
-    let host = 0;
-    let srflx = 0;
-    let relay = 0;
+    let host = 0, srflx = 0, relay = 0;
     for (const l of lines) {
       if (!l.startsWith("a=candidate:")) continue;
       if (l.includes(" typ host")) host++;
@@ -190,32 +333,24 @@ app.post("/webrtc/offer", async (req, res) => {
     }
     console.log(`Offer candidates host=${host} srflx=${srflx} relay=${relay}`);
   }
-
   if (!body.sdp || typeof body.sdp.type !== "string" || typeof body.sdp.sdp !== "string") {
     res.status(400).send("Expected body: { sdp: RTCSessionDescriptionInit }");
     return;
   }
 
-  // Single client: replace existing connection
   closeActivePc();
 
-  const pc = new wrtc.RTCPeerConnection({
-    iceServers: getIceServers(),
-  });
+  const pc = new wrtc.RTCPeerConnection({ iceServers: getIceServers() });
   activePc = pc;
 
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
     console.log("Connection state:", s);
     if (s === "connected" || s === "completed") {
-      if (disconnectTimer) {
-        clearTimeout(disconnectTimer);
-        disconnectTimer = null;
-      }
+      if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
       return;
     }
     if (s === "disconnected") {
-      // "disconnected" is often transient. Give ICE time to recover.
       if (disconnectTimer) clearTimeout(disconnectTimer);
       disconnectTimer = setTimeout(() => {
         if (activePc === pc && pc.connectionState === "disconnected") {
@@ -231,13 +366,8 @@ app.post("/webrtc/offer", async (req, res) => {
     }
   };
 
-  pc.oniceconnectionstatechange = () => {
-    console.log("ICE connection state:", pc.iceConnectionState);
-  };
-
-  pc.onicegatheringstatechange = () => {
-    console.log("ICE gathering state:", pc.iceGatheringState);
-  };
+  pc.oniceconnectionstatechange = () => console.log("ICE connection state:", pc.iceConnectionState);
+  pc.onicegatheringstatechange = () => console.log("ICE gathering state:", pc.iceGatheringState);
 
   pc.ondatachannel = (event) => {
     const channel = event.channel;
@@ -246,27 +376,20 @@ app.post("/webrtc/offer", async (req, res) => {
     console.log("DataChannel opened:", channel.label);
 
     channel.onmessage = (ev) => {
-      // Handle incoming data
       if (typeof ev.data === "string") {
-        // JSON message (prompt, settings, etc.)
         try {
           const msg = JSON.parse(ev.data);
-          // Clear queued frames when parameters change to avoid stale settings
-          if (msg.prompt || msg.seed || msg.width || msg.height) {
-            clearPendingFrames();
-          }
+          if (msg.prompt || msg.seed != null || msg.width || msg.height) clearPendingFrames();
           sendToInference(msg);
         } catch {
           console.log("Invalid JSON from client");
         }
       } else {
-        // Binary data (image frame)
         const buffer = Buffer.from(ev.data);
         const base64 = buffer.toString("base64");
         sendToInference({ image_base64: base64 });
       }
     };
-
     channel.onclose = () => {
       console.log("DataChannel closed");
       if (activeChannel === channel) activeChannel = null;
@@ -278,12 +401,10 @@ app.post("/webrtc/offer", async (req, res) => {
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await waitForIceGatheringComplete(pc, ICE_GATHER_TIMEOUT_MS);
-
     if (!pc.localDescription) {
       res.status(500).send("Missing localDescription");
       return;
     }
-
     console.log("Sending SDP answer");
     res.json({ sdp: pc.localDescription });
   } catch (err) {
@@ -292,9 +413,23 @@ app.post("/webrtc/offer", async (req, res) => {
   }
 });
 
-// Start server
-startInference();
+// ---------------- bootstrap ---------------- //
+
+console.log(`VJ FLUX.2 Klein WebRTC server starting (workers=${WORKER_COUNT})`);
+for (let i = 0; i < WORKER_COUNT; i++) spawnWorker(i);
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`VJ WebRTC server listening on 0.0.0.0:${PORT}`);
+  console.log(`Listening on 0.0.0.0:${PORT} (workers=${WORKER_COUNT})`);
 });
+
+// Graceful shutdown
+function shutdown() {
+  console.log("Shutting down...");
+  for (const w of workers) {
+    try { w.proc.stdin.write(JSON.stringify({ command: "shutdown" }) + "\n"); }
+    catch {}
+  }
+  setTimeout(() => process.exit(0), 2000);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
