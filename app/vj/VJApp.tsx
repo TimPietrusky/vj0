@@ -1297,9 +1297,56 @@ export function VJApp() {
               }
             />
 
-            {/* Sub-toolbar — controls live below the title row so every
-                card's title baseline lines up. Resolution + (klein only)
-                α slider — both are live cues you'll touch mid-set. */}
+            {/* Preview comes first so the picture is what your eye lands on
+                when the card opens — settings (resolution, klein params)
+                live below it, where they don't push the visual down. The
+                WebGL StageRenderer applies the same sharpen pass that runs
+                on /vj/stage, so what you see here is what the projector
+                sees (the .vj-canvas-frame ::after CSS overlay supplies the
+                matching scanline+vignette FX). The placeholder text
+                overlays the canvas until a frame arrives. */}
+            <div
+              className="vj-canvas-frame relative flex items-center justify-center w-full"
+              style={{
+                aspectRatio: `${aiOutputWidth} / ${aiOutputHeight}`,
+              }}
+            >
+              <StageRenderer
+                ref={previewRendererRef}
+                sharpen={aiStageSharpen}
+                className="w-full h-full"
+                style={{ objectFit: "contain" }}
+              />
+              {!aiImageUrl && (
+                <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
+                  {aiStatus === "connected" ? (
+                    <span>
+                      <span className="text-[color:var(--vj-info)]">
+                        connected
+                      </span>
+                      <br />
+                      press ▶ generate or hit space
+                    </span>
+                  ) : aiStatus === "connecting" ? (
+                    <span className="text-[color:var(--vj-info)]">
+                      negotiating webrtc…
+                    </span>
+                  ) : (
+                    <span>
+                      connect backend in
+                      <br />
+                      <span className="text-[color:var(--vj-accent)]">
+                        right panel ↗
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Sub-toolbar — settings under the picture so the canvas owns
+                the top of the card. Resolution + (klein only) α slider,
+                steps, match-capture — all live cues you'll touch mid-set. */}
             <div className="flex items-center gap-2 flex-wrap">
               <ResPicker
                 width={aiOutputWidth}
@@ -1359,51 +1406,6 @@ export function VJApp() {
                 >
                   match → {aiOutputLong}
                 </button>
-              )}
-            </div>
-
-            {/* Preview fills the column width; height follows the configured
-                output aspect. The WebGL StageRenderer applies the same
-                sharpen pass that runs on /vj/stage, so what you see here is
-                what the projector sees (the .vj-canvas-frame ::after CSS
-                overlay supplies the matching scanline+vignette FX). The
-                placeholder text overlays the canvas until a frame arrives. */}
-            <div
-              className="vj-canvas-frame relative flex items-center justify-center w-full"
-              style={{
-                aspectRatio: `${aiOutputWidth} / ${aiOutputHeight}`,
-              }}
-            >
-              <StageRenderer
-                ref={previewRendererRef}
-                sharpen={aiStageSharpen}
-                className="w-full h-full"
-                style={{ objectFit: "contain" }}
-              />
-              {!aiImageUrl && (
-                <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
-                  {aiStatus === "connected" ? (
-                    <span>
-                      <span className="text-[color:var(--vj-info)]">
-                        connected
-                      </span>
-                      <br />
-                      press ▶ generate or hit space
-                    </span>
-                  ) : aiStatus === "connecting" ? (
-                    <span className="text-[color:var(--vj-info)]">
-                      negotiating webrtc…
-                    </span>
-                  ) : (
-                    <span>
-                      connect backend in
-                      <br />
-                      <span className="text-[color:var(--vj-accent)]">
-                        right panel ↗
-                      </span>
-                    </span>
-                  )}
-                </div>
               )}
             </div>
 
