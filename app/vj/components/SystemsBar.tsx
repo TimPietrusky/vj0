@@ -18,6 +18,8 @@ interface SystemsBarProps {
   dmxStatus: DmxStatus;
   dmxFixtureCount: number;
   dmxActiveCount: number;
+  /** Master DMX/lighting switch — when false the DMX block goes muted "off". */
+  lightingEnabled: boolean;
   onHideUi: () => void;
   hideUi: boolean;
 }
@@ -35,6 +37,7 @@ export function SystemsBar({
   dmxStatus,
   dmxFixtureCount,
   dmxActiveCount,
+  lightingEnabled,
   onHideUi,
   hideUi,
 }: SystemsBarProps) {
@@ -55,14 +58,15 @@ export function SystemsBar({
       ? "info"
       : "info";
 
-  const dmxTone: Tone =
-    dmxStatus === "connected"
-      ? "live"
-      : dmxStatus === "unsupported"
-      ? "error"
-      : dmxStatus === "connecting"
-      ? "info"
-      : "info";
+  const dmxTone: Tone = !lightingEnabled
+    ? "muted"
+    : dmxStatus === "connected"
+    ? "live"
+    : dmxStatus === "unsupported"
+    ? "error"
+    : dmxStatus === "connecting"
+    ? "info"
+    : "info";
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel)]/95 backdrop-blur-sm">
@@ -96,7 +100,9 @@ export function SystemsBar({
           label="DMX"
           tone={dmxTone}
           value={
-            dmxStatus === "unsupported"
+            !lightingEnabled
+              ? "off"
+              : dmxStatus === "unsupported"
               ? "no webusb"
               : dmxStatus === "connected"
               ? `${dmxActiveCount}/${dmxFixtureCount}`
@@ -152,7 +158,7 @@ function SysBlock({
   return (
     <div className="flex items-center gap-2" title={title ?? `${label}: ${value}`}>
       <span
-        className="vj-dot"
+        className={tone === "muted" ? "vj-dot vj-dot--static" : "vj-dot"}
         style={{ color }}
         aria-hidden
       />

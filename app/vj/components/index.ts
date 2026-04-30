@@ -12,3 +12,4 @@ export { Popover } from "./Popover";
 export { ResPicker } from "./ResPicker";
 export { StageRenderer, type StageRendererHandle } from "./StageRenderer";
 export { FogControl } from "./FogControl";
+export { PanelHeader } from "./PanelHeader";

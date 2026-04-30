@@ -213,10 +213,11 @@ export function FixtureInspector({
           channel. Auto (default) lets the engine compute the value (255
           full-on, 0 during strobe blackouts). Manual lets the user pin
           the brightness via the slider; strobe blackouts do NOT dim a
-          manually-driven fixture, since the user is asserting a level. */}
+          manually-driven fixture, since the user is asserting a level.
+          Slider capped via vj-range--tight so it never sprawls the row. */}
       {hasDimmer && (
         <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+          <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-7">
             dim
           </span>
           <div className="inline-flex rounded border border-[color:var(--vj-edge-hot)] overflow-hidden">
@@ -251,7 +252,7 @@ export function FixtureInspector({
             onChange={(e) =>
               onManualDimmerChange(parseInt(e.target.value, 10))
             }
-            className="vj-range flex-1"
+            className="vj-range vj-range--tight"
             style={
               {
                 ["--vj-range-fill" as string]: `${(manualDimmer / 255) * 100}%`,
@@ -260,7 +261,7 @@ export function FixtureInspector({
             disabled={dimmerMode !== "manual"}
             title={`Manual dimmer: ${manualDimmer}`}
           />
-          <span className="font-mono text-[10px] tabular-nums text-[color:var(--vj-info)] w-8 text-right">
+          <span className="font-mono text-[10px] tabular-nums text-[color:var(--vj-info)] w-8 text-right ml-auto">
             {manualDimmer}
           </span>
         </div>
@@ -298,64 +299,79 @@ export function FixtureInspector({
 
       {/* Row 4 — audio-reactive strobe / fog-trigger controls. Only for
           fixtures with a channel that hooks into the strobe pipeline
-          (strobe or fog — both read from strobeValue). */}
+          (strobe or fog — both read from strobeValue). The mode select
+          stays on top; thr/max sliders share a row underneath so the
+          paired controls read as one cluster. */}
       {(hasStrobe || fixture.profile.channels.includes("fog")) && (
-        <div className="grid grid-cols-3 gap-2 pt-1 border-t border-[color:var(--vj-edge)]">
-          <select
-            value={strobeMode}
-            onChange={(e) => onStrobeModeChange(e.target.value as StrobeMode)}
-            className="vj-input text-[11px]"
-            title="Audio feature that drives the strobe/fog channel"
-          >
-            {STROBE_MODE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-8">
-              thr
+        <div className="flex flex-col gap-1.5 pt-1 border-t border-[color:var(--vj-edge)]">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-7">
+              src
             </span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={strobeThreshold * 100}
-              onChange={(e) =>
-                onStrobeThresholdChange(parseInt(e.target.value, 10) / 100)
-              }
-              className="vj-range flex-1"
-              style={
-                {
-                  ["--vj-range-fill" as string]: `${strobeThreshold * 100}%`,
-                } as React.CSSProperties
-              }
-              disabled={strobeMode === "off"}
-              title={`Trigger threshold: ${(strobeThreshold * 100).toFixed(0)}%`}
-            />
+            <select
+              value={strobeMode}
+              onChange={(e) => onStrobeModeChange(e.target.value as StrobeMode)}
+              className="vj-input text-[11px] flex-1"
+              title="Audio feature that drives the strobe/fog channel"
+            >
+              {STROBE_MODE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
-          <div className="flex items-center gap-1">
-            <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-8">
-              max
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={255}
-              value={strobeMax}
-              onChange={(e) =>
-                onStrobeMaxChange(parseInt(e.target.value, 10))
-              }
-              className="vj-range flex-1"
-              style={
-                {
-                  ["--vj-range-fill" as string]: `${(strobeMax / 255) * 100}%`,
-                } as React.CSSProperties
-              }
-              disabled={strobeMode === "off"}
-              title={`Max DMX value: ${strobeMax}`}
-            />
+          <div className="grid grid-cols-2 gap-2">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-7">
+                thr
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={strobeThreshold * 100}
+                onChange={(e) =>
+                  onStrobeThresholdChange(parseInt(e.target.value, 10) / 100)
+                }
+                className="vj-range flex-1"
+                style={
+                  {
+                    ["--vj-range-fill" as string]: `${strobeThreshold * 100}%`,
+                  } as React.CSSProperties
+                }
+                disabled={strobeMode === "off"}
+                title={`Trigger threshold: ${(strobeThreshold * 100).toFixed(0)}%`}
+              />
+              <span className="font-mono text-[9px] tabular-nums text-[color:var(--vj-info)] w-7 text-right">
+                {(strobeThreshold * 100).toFixed(0)}
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[9px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-7">
+                max
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={255}
+                value={strobeMax}
+                onChange={(e) =>
+                  onStrobeMaxChange(parseInt(e.target.value, 10))
+                }
+                className="vj-range flex-1"
+                style={
+                  {
+                    ["--vj-range-fill" as string]: `${(strobeMax / 255) * 100}%`,
+                  } as React.CSSProperties
+                }
+                disabled={strobeMode === "off"}
+                title={`Max DMX value: ${strobeMax}`}
+              />
+              <span className="font-mono text-[9px] tabular-nums text-[color:var(--vj-info)] w-7 text-right">
+                {strobeMax}
+              </span>
+            </div>
           </div>
         </div>
       )}

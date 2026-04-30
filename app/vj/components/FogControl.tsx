@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { PanelHeader } from "./PanelHeader";
 
 interface FogControlProps {
   intensity: number;
@@ -13,12 +14,11 @@ interface FogControlProps {
 }
 
 /**
- * Dedicated FOG control card. Click the big button (or hit hotkey "0") to
- * toggle fog on; click again to turn it off. Intensity slider controls the
- * DMX value while ON — it's read fresh on every toggle so adjustments during
- * an active burst don't suddenly change the stream (you'd need to toggle
- * off+on to apply). Kept in its own card so the state is one glance away
- * during a set — a fog machine left running by accident is bad.
+ * Dedicated FOG control card. Click the button (or hit hotkey "0") to toggle
+ * fog on/off. Intensity is the DMX value used while ON — read fresh on each
+ * toggle so adjustments during an active burst only apply to the next press
+ * (toggle off+on to commit a new level mid-set). Kept in its own card so the
+ * state is one glance away — a fog machine left running by accident is bad.
  */
 export function FogControl({
   intensity,
@@ -38,40 +38,39 @@ export function FogControl({
 
   return (
     <div className="vj-panel p-2 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="vj-panel-title">Fog</span>
-        <span
-          className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]"
-          title="Hotkey"
+      <PanelHeader
+        title="Fog"
+        actions={
+          <span
+            className="flex items-center gap-1 text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]"
+            title="Hotkey"
+          >
+            <kbd className="inline-flex items-center justify-center w-5 h-5 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-bg)] text-[color:var(--vj-info)] text-[10px]">
+              0
+            </kbd>
+          </span>
+        }
+      />
+
+      {/* Toggle + intensity on a single row so the live cue is one glance. */}
+      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`
+            rounded-md border px-3 py-2 font-mono text-[11px] uppercase tracking-[0.2em]
+            transition-colors w-24 text-center
+            ${
+              active
+                ? "border-[color:var(--vj-live)] text-[color:var(--vj-live)] bg-[color-mix(in_srgb,var(--vj-live)_20%,transparent)] shadow-[0_0_18px_-4px_var(--vj-live)]"
+                : "border-[color:var(--vj-accent)] text-[color:var(--vj-accent)] bg-[color-mix(in_srgb,var(--vj-accent)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--vj-accent)_18%,transparent)]"
+            }
+          `}
+          title={active ? "Fog is ON — click to stop" : "Click to turn fog ON (hotkey: 0)"}
         >
-          <kbd className="inline-flex items-center justify-center min-w-[20px] px-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-bg)] text-[color:var(--vj-info)] text-[10px]">
-            0
-          </kbd>
-          toggle
-        </span>
-      </div>
+          {active ? "● on" : "○ off"}
+        </button>
 
-      <button
-        type="button"
-        onClick={onToggle}
-        className={`
-          w-full rounded-md border py-3 font-mono text-[14px] uppercase tracking-[0.2em]
-          transition-colors
-          ${
-            active
-              ? "border-[color:var(--vj-live)] text-[color:var(--vj-live)] bg-[color-mix(in_srgb,var(--vj-live)_20%,transparent)] shadow-[0_0_24px_-4px_var(--vj-live)]"
-              : "border-[color:var(--vj-accent)] text-[color:var(--vj-accent)] bg-[color-mix(in_srgb,var(--vj-accent)_8%,transparent)] hover:bg-[color-mix(in_srgb,var(--vj-accent)_18%,transparent)] hover:shadow-[0_0_18px_-4px_var(--vj-accent)]"
-          }
-        `}
-        title={active ? "Fog is ON — click to stop" : "Click to turn fog ON (hotkey: 0)"}
-      >
-        {active ? "● fog on" : "○ fog off"}
-      </button>
-
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-16">
-          intensity
-        </span>
         <input
           type="range"
           min={0}
@@ -79,7 +78,7 @@ export function FogControl({
           step={1}
           value={intensity}
           onChange={(e) => onSetIntensity(Number(e.target.value))}
-          className="vj-range flex-1"
+          className="vj-range vj-range--tight"
           style={
             {
               ["--vj-range-fill" as string]: `${(intensity / 255) * 100}%`,
@@ -87,7 +86,7 @@ export function FogControl({
           }
           title="DMX value on the fog channel while fog is on (0–255)"
         />
-        <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-14 text-right">
+        <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right">
           {intensity}
         </span>
       </div>

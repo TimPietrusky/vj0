@@ -236,6 +236,72 @@ body::before {
   font-weight: 600;
 }
 
+/* Standard panel header — fixed height so every card's title row lines up
+   visually no matter what controls live on the right. The right slot is
+   reserved for icon-sized buttons / kbd hints / single small toggles; bigger
+   per-card controls (sliders, multi-button toolbars) belong in their own row
+   below the header, not on it. */
+.vj-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  height: 1.75rem; /* 28px — same as vj-btn at default padding */
+  flex-shrink: 0;
+}
+.vj-panel-header > .vj-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  height: 100%;
+}
+
+/* Tiny icon-sized header button — 24×24, used in the .vj-panel-actions slot
+   so headers across cards have the same visual weight. Variants pick a tone
+   (muted/live/error) without changing the box dimensions. */
+.vj-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1px solid var(--vj-edge);
+  background: var(--vj-panel-2);
+  color: var(--vj-ink-dim);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 120ms;
+}
+.vj-icon-btn:hover:not(:disabled) {
+  border-color: var(--vj-info);
+  color: var(--vj-info);
+}
+.vj-icon-btn[aria-pressed="true"],
+.vj-icon-btn--on {
+  border-color: var(--vj-live);
+  color: var(--vj-live);
+  background: color-mix(in srgb, var(--vj-live) 12%, transparent);
+}
+.vj-icon-btn[aria-pressed="true"]:hover,
+.vj-icon-btn--on:hover {
+  background: color-mix(in srgb, var(--vj-live) 24%, transparent);
+  box-shadow: 0 0 12px -3px var(--vj-live);
+}
+.vj-icon-btn--off {
+  color: var(--vj-muted);
+  border-color: var(--vj-edge);
+}
+
+/* Tight inline slider used inside cards. Caps the bar at a sensible width
+   so a stray flex-1 doesn't stretch a 0..1 control across the whole card.
+   Use when the slider lives in a row with a label + value readout. */
+.vj-range--tight {
+  width: 100%;
+  max-width: 9rem;
+}
+
 /* Checkbox — bright magenta when checked */
 .vj-check {
   appearance: none;

@@ -43,6 +43,7 @@ import {
   PromptDock,
   HotkeyBoard,
   Field,
+  PanelHeader,
   ResPicker,
   StageRenderer,
   type StageRendererHandle,
@@ -425,6 +426,8 @@ export function VJApp() {
   );
 
   const fixtures = useFixtures();
+  const lightingEnabled = useLightingStore((s) => s.enabled);
+  const setLightingEnabled = useLightingStore((s) => s.setEnabled);
   const {
     addFixture,
     removeFixture,
@@ -498,7 +501,12 @@ export function VJApp() {
     [fixtures]
   );
 
+  // Read lightingEnabled fresh from the store on every frame instead of
+  // closing over the React state — that way flipping the master switch
+  // takes effect on the very next 30 Hz tick without needing the
+  // LightingEngine to be torn down and rebuilt.
   const handleDmxFrame = useCallback((frame: LightingFrame) => {
+    if (!useLightingStore.getState().enabled) return;
     const dmx = dmxOutputRef.current;
     if (dmx && dmx.isConnected()) {
       dmx.sendUniverse(frame.universe);
@@ -1157,6 +1165,7 @@ export function VJApp() {
         dmxStatus={dmxStatus}
         dmxFixtureCount={fixtures.length}
         dmxActiveCount={dmxActiveCount}
+        lightingEnabled={lightingEnabled}
         hideUi={aiHideUi}
         onHideUi={() => setAiHideUi(!aiHideUi)}
       />
@@ -1174,25 +1183,30 @@ export function VJApp() {
         {/* ============== LEFT COL: waveform + sources ============== */}
         <section className="xl:col-span-3 flex flex-col gap-2 min-w-0">
           <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="vj-panel-title">Waveform / Source</div>
-              <div className="flex items-center gap-1.5 text-[10px] text-[color:var(--vj-ink-dim)] normal-case">
+            <PanelHeader
+              title="Waveform / Source"
+              actions={
                 <span
-                  className="vj-dot vj-dot--static"
-                  style={{
-                    color:
-                      status === "running"
-                        ? "var(--vj-live)"
-                        : status === "error"
-                        ? "var(--vj-error)"
-                        : "var(--vj-info)",
-                  }}
-                />
-                <span className="tracking-wider uppercase">
-                  {status === "running" ? "live" : status}
+                  className="flex items-center gap-1.5 text-[10px] text-[color:var(--vj-ink-dim)] normal-case h-full"
+                  title={`Audio status: ${status}`}
+                >
+                  <span
+                    className="vj-dot vj-dot--static"
+                    style={{
+                      color:
+                        status === "running"
+                          ? "var(--vj-live)"
+                          : status === "error"
+                          ? "var(--vj-error)"
+                          : "var(--vj-info)",
+                    }}
+                  />
+                  <span className="tracking-wider uppercase">
+                    {status === "running" ? "live" : status}
+                  </span>
                 </span>
-              </div>
-            </div>
+              }
+            />
 
             <div className="vj-canvas-frame aspect-[4/1] w-full">
               <canvas
@@ -1243,16 +1257,20 @@ export function VJApp() {
           </div>
 
           <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <div className="vj-panel-title">Audio Features</div>
-              <button
-                onClick={() => setShowDebug(!showDebug)}
-                className="vj-btn"
-                title="Hides the panel and stops the polling timer."
-              >
-                {showDebug ? "Hide" : "Show"}
-              </button>
-            </div>
+            <PanelHeader
+              title="Audio Features"
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setShowDebug(!showDebug)}
+                  aria-pressed={showDebug}
+                  className={`vj-icon-btn ${showDebug ? "vj-icon-btn--on" : ""}`}
+                  title="Hides the panel and stops the polling timer."
+                >
+                  {showDebug ? "ON" : "OFF"}
+                </button>
+              }
+            />
             {showDebug && <AudioDebugPanel features={debugFeatures} />}
           </div>
         </section>
@@ -1260,10 +1278,34 @@ export function VJApp() {
         {/* ============== CENTER COL: AI output + prompt ============== */}
         <section className="xl:col-span-5 flex flex-col gap-2 min-w-0">
           <div className="vj-panel p-2 flex flex-col gap-2 flex-1">
-            {/* Toolbar — everything you actually touch while playing lives
-                directly above the picture: generate, resolution, klein alpha. */}
+            <PanelHeader
+              title="AI Output"
+              actions={
+                <button
+                  type="button"
+                  onClick={() => setAiSendFrames(!aiSendFrames)}
+                  disabled={!aiTransport.isConnected()}
+                  className={`vj-btn ${aiSendFrames ? "vj-btn--live" : "vj-btn--accent"}`}
+                  title={
+                    !aiTransport.isConnected()
+                      ? "Connect AI first"
+                      : "Toggle generation (Space)"
+                  }
+                >
+                  {aiSendFrames ? "■ stop" : "▶ generate"}
+                </button>
+              }
+            />
+
+            {/* Sub-toolbar — controls live below the title row so every
+                card's title baseline lines up. Resolution + (klein only)
+                α slider — both are live cues you'll touch mid-set. */}
             <div className="flex items-center gap-2 flex-wrap">
-              <div className="vj-panel-title mr-auto">AI Output</div>
+              <ResPicker
+                width={aiOutputWidth}
+                height={aiOutputHeight}
+                onPick={setAiOutputSize}
+              />
               {aiBackend === "klein" && (
                 <div
                   className="flex items-center gap-1.5 px-2 py-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)]"
@@ -1279,7 +1321,7 @@ export function VJApp() {
                     step={0.01}
                     value={aiKleinAlpha}
                     onChange={(e) => setAiKleinAlpha(Number(e.target.value))}
-                    className="vj-range w-20"
+                    className="vj-range w-24"
                     style={
                       {
                         ["--vj-range-fill" as string]: `${sliderFillPct}%`,
@@ -1291,24 +1333,33 @@ export function VJApp() {
                   </span>
                 </div>
               )}
-              <ResPicker
-                width={aiOutputWidth}
-                height={aiOutputHeight}
-                onPick={setAiOutputSize}
-              />
-              <button
-                type="button"
-                onClick={() => setAiSendFrames(!aiSendFrames)}
-                disabled={!aiTransport.isConnected()}
-                className={`vj-btn ${aiSendFrames ? "vj-btn--live" : "vj-btn--accent"}`}
-                title={
-                  !aiTransport.isConnected()
-                    ? "Connect AI first"
-                    : "Toggle generation (Space)"
-                }
-              >
-                {aiSendFrames ? "■ stop" : "▶ generate"}
-              </button>
+              {aiBackend === "klein" && (
+                <label
+                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)] text-[10px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]"
+                  title="Klein steps — 1 fastest, 2 sweet spot, 4 max quality"
+                >
+                  <span>steps</span>
+                  <select
+                    value={aiKleinSteps}
+                    onChange={(e) => setAiKleinSteps(Number(e.target.value))}
+                    className="bg-transparent border-0 outline-none text-[color:var(--vj-info)] tabular-nums normal-case font-mono py-0 pr-1"
+                  >
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                    <option value={3}>3</option>
+                    <option value={4}>4</option>
+                  </select>
+                </label>
+              )}
+              {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
+                <button
+                  onClick={() => setAiCaptureSize(aiOutputLong)}
+                  className="vj-btn vj-btn--accent"
+                  title={`Match capture to output long side (${aiOutputLong}) for sharper Klein output`}
+                >
+                  match → {aiOutputLong}
+                </button>
+              )}
             </div>
 
             {/* Preview fills the column width; height follows the configured
@@ -1380,43 +1431,46 @@ export function VJApp() {
         {/* ============== RIGHT COL: AI settings + lighting ============== */}
         {/* ============== RIGHT COL: AI backend + Lighting ============== */}
         <aside className="xl:col-span-4 flex flex-col gap-2 min-w-0">
-          {/* AI Backend — everything that connects to and configures the
-              model. Status + α slider live on the AI Output card; resolution
-              lives in the toolbar above the preview. What's left here is
-              connection wiring + per-frame params, in a dense 2-col grid. */}
+          {/* AI Backend — connection wiring + per-frame params. Klein-only
+              live controls (α, steps, match-capture) live on the AI Output
+              toolbar; Stage FX has its own card below. */}
           <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <div className="vj-panel-title mr-auto">AI Backend</div>
-              <label
-                className="flex items-center gap-1.5 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider"
-                title="Auto-connect on page load and on backend switch"
-              >
-                <input
-                  type="checkbox"
-                  checked={aiAutoConnect}
-                  onChange={(e) => setAiAutoConnect(e.target.checked)}
-                  className="vj-check"
-                />
-                auto
-              </label>
-              {aiStatus === "connected" || aiStatus === "connecting" ? (
-                <button
-                  onClick={() => void aiTransport.stop()}
-                  className="vj-btn vj-btn--danger"
-                  title="Close the WebRTC channel"
-                >
-                  ✕ disconnect
-                </button>
-              ) : (
-                <button
-                  onClick={() => void aiTransport.start()}
-                  className="vj-btn vj-btn--live"
-                  title="Open WebRTC channel to the AI backend"
-                >
-                  ▶ connect
-                </button>
-              )}
-            </div>
+            <PanelHeader
+              title="AI Backend"
+              actions={
+                <>
+                  <label
+                    className="flex items-center gap-1.5 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider h-full"
+                    title="Auto-connect on page load and on backend switch"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={aiAutoConnect}
+                      onChange={(e) => setAiAutoConnect(e.target.checked)}
+                      className="vj-check"
+                    />
+                    auto
+                  </label>
+                  {aiStatus === "connected" || aiStatus === "connecting" ? (
+                    <button
+                      onClick={() => void aiTransport.stop()}
+                      className="vj-btn vj-btn--danger"
+                      title="Close the WebRTC channel"
+                    >
+                      ✕ disconnect
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void aiTransport.start()}
+                      className="vj-btn vj-btn--live"
+                      title="Open WebRTC channel to the AI backend"
+                    >
+                      ▶ connect
+                    </button>
+                  )}
+                </>
+              }
+            />
 
             <select
               value={aiBackend}
@@ -1434,7 +1488,8 @@ export function VJApp() {
               ))}
             </select>
 
-            {/* Per-frame params — two columns, dense. */}
+            {/* Per-frame params — two columns, dense. Seed is grouped with
+                its randomize button so the pair reads as one control. */}
             <div className="grid grid-cols-2 gap-2">
               <Field label="Capture px">
                 <select
@@ -1496,86 +1551,6 @@ export function VJApp() {
                   <option value="bilinear">Bilinear (soft)</option>
                 </select>
               </Field>
-
-              {aiBackend === "klein" && (
-                <Field label="Klein steps">
-                  <select
-                    value={aiKleinSteps}
-                    onChange={(e) => setAiKleinSteps(Number(e.target.value))}
-                    className="vj-input"
-                    title="Klein is distilled for 4 steps. 2 = sweet spot."
-                  >
-                    <option value={1}>1 · fastest</option>
-                    <option value={2}>2 · recommended</option>
-                    <option value={3}>3 · more detail</option>
-                    <option value={4}>4 · max quality</option>
-                  </select>
-                </Field>
-              )}
-              {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
-                <button
-                  onClick={() => setAiCaptureSize(aiOutputLong)}
-                  className="vj-btn vj-btn--accent self-end"
-                  title={`Match capture to output long side (${aiOutputLong}) for sharper Klein output`}
-                >
-                  match capture → {aiOutputLong}
-                </button>
-              )}
-            </div>
-
-            {/* Stage FX — applied on the /vj/stage page (not this preview).
-                Sharpen runs as a WebGL unsharp-mask pass; scanlines + vignette
-                are CSS overlays matching the preview frame's look. */}
-            <div className="border-t border-[color:var(--vj-edge)] pt-2 flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <span className="vj-panel-title">Stage FX</span>
-                <span className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
-                  applies on /vj/stage
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-16">
-                  sharpen
-                </span>
-                <input
-                  type="range"
-                  min={0}
-                  max={10}
-                  step={0.1}
-                  value={aiStageSharpen}
-                  onChange={(e) => setAiStageSharpen(Number(e.target.value))}
-                  className="vj-range flex-1"
-                  style={
-                    {
-                      ["--vj-range-fill" as string]: `${(aiStageSharpen / 10) * 100}%`,
-                    } as React.CSSProperties
-                  }
-                  title="WebGL unsharp-mask strength (0 = off, ~1 mild, 10 = aggressive)"
-                />
-                <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right">
-                  {aiStageSharpen.toFixed(1)}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
-                  <input
-                    type="checkbox"
-                    checked={aiStageScanlines}
-                    onChange={(e) => setAiStageScanlines(e.target.checked)}
-                    className="vj-check"
-                  />
-                  scanlines
-                </label>
-                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
-                  <input
-                    type="checkbox"
-                    checked={aiStageVignette}
-                    onChange={(e) => setAiStageVignette(e.target.checked)}
-                    className="vj-check"
-                  />
-                  vignette
-                </label>
-              </div>
             </div>
 
             {/* Diagnostics live behind a disclosure so they don't crowd the
@@ -1627,45 +1602,107 @@ export function VJApp() {
             </details>
           </div>
 
+          {/* Stage FX — its own card. Sharpen runs as a WebGL unsharp-mask
+              pass on /vj/stage; scanlines + vignette are CSS overlays
+              matching the preview frame. Header carries the apply-target
+              hint so users see at a glance this isn't the preview. */}
+          <div className="vj-panel p-2 flex flex-col gap-2">
+            <PanelHeader
+              title="Stage FX"
+              actions={
+                <span className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
+                  /vj/stage
+                </span>
+              }
+            />
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-16">
+                sharpen
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={10}
+                step={0.1}
+                value={aiStageSharpen}
+                onChange={(e) => setAiStageSharpen(Number(e.target.value))}
+                className="vj-range vj-range--tight"
+                style={
+                  {
+                    ["--vj-range-fill" as string]: `${(aiStageSharpen / 10) * 100}%`,
+                  } as React.CSSProperties
+                }
+                title="WebGL unsharp-mask strength (0 = off, ~1 mild, 10 = aggressive)"
+              />
+              <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right ml-auto">
+                {aiStageSharpen.toFixed(1)}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
+                <input
+                  type="checkbox"
+                  checked={aiStageScanlines}
+                  onChange={(e) => setAiStageScanlines(e.target.checked)}
+                  className="vj-check"
+                />
+                scanlines
+              </label>
+              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
+                <input
+                  type="checkbox"
+                  checked={aiStageVignette}
+                  onChange={(e) => setAiStageVignette(e.target.checked)}
+                  className="vj-check"
+                />
+                vignette
+              </label>
+            </div>
+          </div>
+
           {/* Fog — own card so the toggle button + hotkey are one glance
               away. Sits above the Lighting card because fog state is a live
-              cue and shouldn't be hidden inside a fixture list. */}
-          <FogControl
-            intensity={fogIntensity}
-            onSetIntensity={setFogIntensity}
-            onToggle={triggerFog}
-            isActive={() =>
-              lightingEngineRef.current?.isFogActive() ?? false
-            }
-          />
-
-          {/* Lighting / DMX — header status comes from the SystemsBar, so this
-              card jumps straight to the action: pair button + fixture list. */}
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <div className="vj-panel-title">Lighting / DMX</div>
-            <LightingPanel
-              dmxStatus={dmxStatus}
-              dmxSupported={dmxSupported}
-              onDmxConnect={handleDmxConnect}
-              onDmxDisconnect={handleDmxDisconnect}
-              onDmxReconnect={handleDmxReconnect}
-              selectedProfileId={selectedProfileId}
-              onProfileSelect={setSelectedProfileId}
-              onAddFixture={handleAddFixture}
-              fixtures={fixtures}
-              fixtureValues={fixtureValues}
-              onFixtureAddressChange={handleFixtureAddressChange}
-              onFixtureStrobeModeChange={handleStrobeModeChange}
-              onFixtureStrobeThresholdChange={handleStrobeThresholdChange}
-              onFixtureStrobeMaxChange={handleStrobeMaxChange}
-              onFixtureColorModeChange={handleColorModeChange}
-              onFixtureSolidColorChange={handleSolidColorChange}
-              onFixtureProfileChange={handleFixtureProfileChange}
-              onFixtureRemove={handleRemoveFixture}
-              onFixtureDimmerModeChange={handleDimmerModeChange}
-              onFixtureManualDimmerChange={handleManualDimmerChange}
+              cue and shouldn't be hidden inside a fixture list. Hidden when
+              the master DMX/lighting switch is off — fog rides on a DMX
+              channel, so it's meaningless without the universe live. */}
+          {lightingEnabled && (
+            <FogControl
+              intensity={fogIntensity}
+              onSetIntensity={setFogIntensity}
+              onToggle={triggerFog}
+              isActive={() =>
+                lightingEngineRef.current?.isFogActive() ?? false
+              }
             />
-          </div>
+          )}
+
+          {/* Lighting / DMX — its own internal master toggle controls the
+              entire card body. Status comes from the SystemsBar so this
+              card jumps straight to the action when enabled. */}
+          <LightingPanel
+            enabled={lightingEnabled}
+            onSetEnabled={setLightingEnabled}
+            dmxStatus={dmxStatus}
+            dmxSupported={dmxSupported}
+            onDmxConnect={handleDmxConnect}
+            onDmxDisconnect={handleDmxDisconnect}
+            onDmxReconnect={handleDmxReconnect}
+            selectedProfileId={selectedProfileId}
+            onProfileSelect={setSelectedProfileId}
+            onAddFixture={handleAddFixture}
+            fixtures={fixtures}
+            fixtureValues={fixtureValues}
+            onFixtureAddressChange={handleFixtureAddressChange}
+            onFixtureStrobeModeChange={handleStrobeModeChange}
+            onFixtureStrobeThresholdChange={handleStrobeThresholdChange}
+            onFixtureStrobeMaxChange={handleStrobeMaxChange}
+            onFixtureColorModeChange={handleColorModeChange}
+            onFixtureSolidColorChange={handleSolidColorChange}
+            onFixtureProfileChange={handleFixtureProfileChange}
+            onFixtureRemove={handleRemoveFixture}
+            onFixtureDimmerModeChange={handleDimmerModeChange}
+            onFixtureManualDimmerChange={handleManualDimmerChange}
+          />
         </aside>
       </div>
     </div>

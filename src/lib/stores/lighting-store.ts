@@ -32,8 +32,17 @@ interface SerializedFixture {
 
 interface LightingState {
   fixtures: SerializedFixture[];
+  /**
+   * Master switch for the entire DMX/lighting subsystem. When false, the UI
+   * hides the fixture list, fog card, and DMX status — and the DMX output
+   * driver is bypassed so no frames go to the physical universe. Audio
+   * features and visuals keep running; only the lighting branch is silenced.
+   * Persisted so a "DMX off for tonight, just visuals" choice survives reloads.
+   */
+  enabled: boolean;
 
   // Actions
+  setEnabled: (value: boolean) => void;
   addFixture: (profileId: string) => void;
   removeFixture: (id: string) => void;
   updateFixtureAddress: (id: string, address: number) => void;
@@ -151,6 +160,9 @@ export const useLightingStore = create<LightingState>()(
   persist(
     (set) => ({
       fixtures: initialFixtures,
+      enabled: true,
+
+      setEnabled: (value: boolean) => set({ enabled: value }),
 
       addFixture: (profileId: string) =>
         set((state) => {
