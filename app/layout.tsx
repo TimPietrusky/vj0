@@ -14,9 +14,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    // suppressHydrationWarning on BOTH <html> and <body>: browser extensions
+    // inject attributes on these top-level elements before React hydrates,
+    // and there's no way to make the SSR output match. Known offenders:
+    //   <html>: Google Analytics Opt-out (data-google-analytics-opt-out),
+    //           Dark Reader (data-darkreader-*)
+    //   <body>: ColorZilla (cz-shortcut-listen),
+    //           Grammarly (data-gr-*, data-new-gr-c-s-*),
+    //           various password managers
+    // The flag is one-level-deep — only this element's own attributes are
+    // exempted, children are still hydration-checked normally.
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${GeistSans.variable} ${GeistMono.variable} antialiased`}
+        suppressHydrationWarning
       >
         {children}
       </body>

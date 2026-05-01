@@ -1,4 +1,4 @@
-import { VJApp } from "./vj/VJApp";
+import { VJApp } from "./vj/VJAppLoader";
 
 export const metadata = {
   title: "vj0 — live audio-reactive visuals",
