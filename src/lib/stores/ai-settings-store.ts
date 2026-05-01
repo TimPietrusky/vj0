@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 export type AiBackend = "klein" | "sdturbo" | "zimage";
 
 export const AI_BACKEND_URLS: Record<AiBackend, string> = {
-  klein: "https://3m90zbu8fwyyqk-3000.proxy.runpod.net/webrtc/offer",
+  klein: "https://lrlvdh3j31k14t-3000.proxy.runpod.net/webrtc/offer",
   sdturbo: "https://3746utbd1i3x73-3000.proxy.runpod.net/webrtc/offer",
   zimage: "https://astt1jyau6hsaq-3000.proxy.runpod.net/webrtc/offer",
 };
@@ -75,6 +75,36 @@ export function findOutputPreset(w: number, h: number): OutputPreset | undefined
   return OUTPUT_PRESETS.find((p) => p.w === w && p.h === h);
 }
 
+// Recording output resolution. The recording engine composites the AI
+// preview canvas onto a fresh offscreen canvas at one of these sizes
+// (object-fit: contain, black letterbox bars), so the produced video has
+// clean, predictable dimensions regardless of how big the source canvas's
+// internal pixel grid happens to be. All 16:9 — vertical/square content
+// shows letterboxed; that's the right call for projector-style sets.
+export type RecordingResolution = "1k" | "2k" | "4k";
+
+export interface RecordingResolutionSpec {
+  id: RecordingResolution;
+  label: string;       // dropdown label
+  shortLabel: string;  // header chip label (super tight)
+  width: number;
+  height: number;
+}
+
+export const RECORDING_RESOLUTIONS: ReadonlyArray<RecordingResolutionSpec> = [
+  { id: "1k", shortLabel: "1K", label: "1K · 1920×1080", width: 1920, height: 1080 },
+  { id: "2k", shortLabel: "2K", label: "2K · 2560×1440", width: 2560, height: 1440 },
+  { id: "4k", shortLabel: "4K", label: "4K · 3840×2160", width: 3840, height: 2160 },
+];
+
+export function getRecordingResolutionSpec(
+  id: RecordingResolution
+): RecordingResolutionSpec {
+  return (
+    RECORDING_RESOLUTIONS.find((r) => r.id === id) ?? RECORDING_RESOLUTIONS[0]
+  );
+}
+
 // Default 1-9 preset prompts, bound to number-key hotkeys in the VJ app.
 // `label` shows on the hotkey chip; `prompt` is what's sent to the model.
 export const DEFAULT_PROMPT_PRESETS: PromptPreset[] = [
@@ -135,6 +165,9 @@ interface AiSettingsState {
   // ON/OFF state itself is not persisted — reloads always start with fog
   // off, which is the safer physical default for a 800 W heater.
   fogIntensity: number;
+  // Output resolution for the in-browser MediaRecorder. Persisted so the
+  // user picks once and forgets. Always 16:9 — see RECORDING_RESOLUTIONS.
+  recordingResolution: RecordingResolution;
 
   setBackend: (value: AiBackend) => void;
   setShowAi: (value: boolean) => void;
@@ -161,6 +194,7 @@ interface AiSettingsState {
   setStagePixelate: (value: boolean) => void;
   setStagePixelateSize: (value: number) => void;
   setFogIntensity: (value: number) => void;
+  setRecordingResolution: (value: RecordingResolution) => void;
 }
 
 export const useAiSettingsStore = create<AiSettingsState>()(
@@ -191,6 +225,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       stagePixelate: false,
       stagePixelateSize: 8,
       fogIntensity: 255,
+      recordingResolution: "1k",
 
       setAudioDeviceId: (value) => set({ audioDeviceId: value }),
       setSceneId: (value) => set({ sceneId: value }),
@@ -207,6 +242,14 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         set({ stagePixelateSize: Math.max(1, Math.min(64, Math.round(value))) }),
       setFogIntensity: (value) =>
         set({ fogIntensity: Math.max(0, Math.min(255, Math.round(value))) }),
+      setRecordingResolution: (value) =>
+        // Defensive: any unknown id falls back to "1k" rather than throwing
+        // — a stale localStorage value shouldn't kill the app.
+        set({
+          recordingResolution: RECORDING_RESOLUTIONS.some((r) => r.id === value)
+            ? value
+            : "1k",
+        }),
       setBackend: (value) => set({ backend: value }),
       setKleinAlpha: (value) =>
         set({ kleinAlpha: Math.max(0, Math.min(0.5, value)) }),
@@ -250,7 +293,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "vj0-ai-settings-storage",
-      version: 7,
+      version: 8,
       migrate: (persisted: unknown, version: number) => {
         // v0/v1 had: outputSize: number, promptPresets: string[]
         // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
@@ -353,6 +396,19 @@ export const useAiSettingsStore = create<AiSettingsState>()(
               out.outputWidth = big ? 512 : 256;
               out.outputHeight = big ? 288 : 144;
             }
+          }
+        }
+
+        if (version < 8) {
+          // New `recordingResolution` field for the in-browser MP4/WebM
+          // recorder. Default to "1k" (Full HD) — small files, fast share,
+          // matches the most common projector output. Users who want
+          // higher fidelity can flip to 2K/4K via the dropdown.
+          if (
+            typeof out.recordingResolution !== "string" ||
+            !["1k", "2k", "4k"].includes(out.recordingResolution as string)
+          ) {
+            out.recordingResolution = "1k";
           }
         }
 

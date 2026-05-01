@@ -10,7 +10,6 @@ interface HotkeyBoardProps {
   onUpdatePreset: (index: number, patch: Partial<PromptPreset>) => void;
 
   onRandom: () => void;
-  onHideUi: () => void;
   /** Fires a manual fog burst. Bound to the "0" key and its on-screen cap. */
   onFireFog?: () => void;
 
@@ -27,7 +26,7 @@ interface HotkeyBoardProps {
  * All caps share the same width/height so the board reads as a real keyboard
  * row, not a list of mismatched buttons. Two rows:
  *   1) preset triggers (1-9)
- *   2) global actions (Space, arrows, H)
+ *   2) global actions (Space, arrows, fog)
  */
 export function HotkeyBoard({
   presets,
@@ -35,7 +34,6 @@ export function HotkeyBoard({
   onFirePreset,
   onUpdatePreset,
   onRandom,
-  onHideUi,
   onFireFog,
   alpha,
   onAlphaDelta,
@@ -123,13 +121,6 @@ export function HotkeyBoard({
             title="Fire a fog burst (hotkey: 0)"
           />
         )}
-
-        <Cap
-          keyLabel="H"
-          caption="hide ui"
-          onClick={onHideUi}
-          title="Toggle fullscreen output (no UI)"
-        />
       </div>
     </div>
   );

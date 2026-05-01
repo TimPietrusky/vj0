@@ -15,9 +15,7 @@ import {
 } from "@/src/lib/stores";
 import {
   AI_BACKEND_URLS,
-  AI_BACKEND_LABELS,
-  type AiBackend,
-  type UpscaleMode,
+  getRecordingResolutionSpec,
 } from "@/src/lib/stores/ai-settings-store";
 import {
   openStageChannel,
@@ -37,18 +35,16 @@ import type {
   DimmerMode,
 } from "@/src/lib/lighting";
 import {
-  AudioDebugPanel,
+  AiConsoleCard,
   LightingPanel,
+  PerformanceDeckCard,
+  StageFxCard,
   SystemsBar,
-  PromptDock,
-  HotkeyBoard,
-  Field,
-  PanelHeader,
-  ResPicker,
-  StageRenderer,
+  WaveformSourceCard,
   type StageRendererHandle,
-  FogControl,
 } from "./components";
+import type { BootPhase } from "./components";
+import { RecordingEngine, type RecordingResult } from "@/src/lib/recording";
 
 type Status = "idle" | "requesting" | "running" | "error";
 type DmxStatus = "disconnected" | "connecting" | "connected" | "unsupported";
@@ -66,91 +62,48 @@ const SYSTEM_AUDIO_VALUE = "__system__";
 /**
  * Main VJ application orchestrator.
  *
- * Layout:
- *  - SystemsBar (sticky, full-width) — audio / visual / ai / dmx status at a glance
- *  - Below: 12-column responsive dashboard grid
- *     [Left col]   waveform + scene/device popovers + audio debug
- *     [Center col] AI output preview (hero) + prompt dock
- *     [Right col]  AI settings + DMX / lighting stack
+ * Layout (signal flow, left → right):
+ *  - SystemsBar (sticky, full-width) — audio / ai / dmx at a glance.
+ *    The DMX chip is also the toggle for the console drawer below.
+ *  - Below: 12-col responsive dashboard, grouped by signal-flow stage
+ *     [INPUT col-3]      waveform + scene/audio source + features
+ *                        (disclosure), STAGE FX below — both "set
+ *                        before the set" surfaces, off the hot path
+ *     [AI CONSOLE col-9] preview (left 2/3) + prompt / generate /
+ *                        per-cue params (right 1/3), PERFORMANCE DECK
+ *                        (hotkey board) below — the wide chip row
+ *                        wants a full-bleed surface, not a thin column
+ *  - DMX console — slide-up drawer surfaced via the DMX chip in the
+ *    SystemsBar. It overlays the dashboard from the bottom (z-25, below
+ *    the sticky bar at z-30), so the user can patch fixtures and tune
+ *    fog without losing the canvas/preview behind it. Esc dismisses.
  *
  * Engine lifecycle via refs (not React state) to avoid blocking render loops.
  */
 
 /**
- * Overlay shown when the AI worker is JIT-compiling for a new (width, height).
- * The compile is a single ~150 s torch.compile call that emits no Python-side
- * progress, so we estimate elapsed/remaining locally from `startedAt` and the
- * server-reported `estSeconds`. A 4 Hz timer keeps the bar moving even when
- * nothing has happened on the network for tens of seconds.
+ * Save a finished RecordingResult as a file the user can keep. We use the
+ * classic anchor-with-download trick rather than a full file-system access
+ * dance — works in every browser, no extra permission, lands in the user's
+ * default downloads folder. The object URL gets revoked after a 1 s delay so
+ * Safari has time to start the download before the URL goes away.
  */
-type BootPhase =
-  | "loading_weights"
-  | "applying_fp8"
-  | "registering_compile_stubs"
-  | "warming_up";
+function triggerRecordingDownload(result: RecordingResult): void {
+  const url = URL.createObjectURL(result.blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `vj0-${formatRecordingTimestamp(new Date())}.${result.extension}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
-const BOOT_PHASE_TITLE: Record<BootPhase, string> = {
-  loading_weights: "Loading the AI model",
-  applying_fp8: "Optimising for speed",
-  registering_compile_stubs: "Almost there",
-  warming_up: "Warming up",
-};
-
-function CompileOverlay({
-  phase,
-  width,
-  height,
-  startedAt,
-  estSeconds,
-  iter,
-  totalIters,
-}: {
-  phase: BootPhase;
-  width?: number;
-  height?: number;
-  startedAt: number;
-  estSeconds: number;
-  iter?: number;
-  totalIters?: number;
-}) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(id);
-  }, []);
-
-  const elapsed = Math.max(0, (now - startedAt) / 1000);
-  const pct = Math.min(0.99, elapsed / Math.max(1, estSeconds));
-  const remaining = Math.max(0, Math.ceil(estSeconds - elapsed));
-  // Resolution is only meaningful during warm-up; during model load there
-  // isn't a "current shape" yet (server's at default until first request).
-  const showSize = phase === "warming_up" && width && height;
-
+function formatRecordingTimestamp(date: Date): string {
+  const pad = (n: number) => n.toString().padStart(2, "0");
   return (
-    <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4 bg-black/85 backdrop-blur-sm gap-3 font-mono">
-      <div className="text-[11px] uppercase tracking-wider text-[color:var(--vj-info)] animate-pulse">
-        {BOOT_PHASE_TITLE[phase]}
-      </div>
-      {showSize && (
-        <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
-          {width}×{height}
-        </div>
-      )}
-      <div className="w-56 h-1.5 bg-white/10 rounded-full overflow-hidden">
-        <div
-          className="h-full bg-[color:var(--vj-accent)] transition-[width] duration-200 ease-linear"
-          style={{ width: `${pct * 100}%` }}
-        />
-      </div>
-      <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] tabular-nums">
-        {Math.round(elapsed)}s elapsed · ~{remaining}s left
-      </div>
-      {phase === "warming_up" && iter && totalIters && (
-        <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-          step {iter} of {totalIters}
-        </div>
-      )}
-    </div>
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`
   );
 }
 
@@ -161,6 +114,9 @@ export function VJApp() {
   const visualEngineRef = useRef<VisualEngine | null>(null);
   const lightingEngineRef = useRef<LightingEngine | null>(null);
   const dmxOutputRef = useRef<DmxOutput | null>(null);
+  // Lazily constructed on first record so we don't allocate the engine
+  // (or its internal MediaRecorder probe) until the user actually wants it.
+  const recordingEngineRef = useRef<RecordingEngine | null>(null);
 
   const aiIceServers = useMemo((): RTCIceServer[] => {
     const raw = process.env.NEXT_PUBLIC_VJ0_WEBRTC_ICE_SERVERS_JSON;
@@ -257,6 +213,18 @@ export function VJApp() {
     );
   }, []);
 
+  // ── Recording state ──────────────────────────────────────────────────────
+  // `recordingSupported` follows the same SSR-safe pattern as systemAudioSupported:
+  // it starts false on the server (no MediaRecorder there) and flips after
+  // hydration so the button's first client render matches the server's HTML.
+  const [recordingSupported, setRecordingSupported] = useState(false);
+  useEffect(() => {
+    setRecordingSupported(RecordingEngine.isSupported());
+  }, []);
+  const [isRecording, setIsRecording] = useState(false);
+  const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
+  const [recordingError, setRecordingError] = useState<string>("");
+
   // Persisted scene + audio-features-visible toggle. We keep currentSceneId
   // as a derived selector because the VisualEngine internally tracks the
   // active scene; the store value is the source of truth across reloads.
@@ -295,6 +263,7 @@ export function VJApp() {
     stagePixelate: aiStagePixelate,
     stagePixelateSize: aiStagePixelateSize,
     fogIntensity,
+    recordingResolution,
     setBackend: setAiBackend,
     setSendFrames: setAiSendFrames,
     setShowCaptureDebug: setAiShowCaptureDebug,
@@ -313,6 +282,7 @@ export function VJApp() {
     setStagePixelate: setAiStagePixelate,
     setStagePixelateSize: setAiStagePixelateSize,
     setFogIntensity,
+    setRecordingResolution,
     updatePromptPreset,
   } = useAiSettingsStore();
 
@@ -447,6 +417,101 @@ export function VJApp() {
     engine.setFogActive(!wasActive, s.fogIntensity);
   }, []);
 
+  // ── Recording control ────────────────────────────────────────────────────
+  // The engine is created on first record so we don't probe MediaRecorder
+  // capabilities for users who never hit the button. Deps are getter
+  // functions: `getCanvas` reads the AI preview's WebGL canvas (the same
+  // picture pushed to /vj/stage), `createAudioTap` opens a fresh sink on
+  // the live audio graph. Both are evaluated at start() time, so the
+  // engine doesn't capture stale references after a device switch.
+  const handleStartRecording = useCallback(() => {
+    setRecordingError("");
+    if (!recordingEngineRef.current) {
+      recordingEngineRef.current = new RecordingEngine({
+        getCanvas: () => previewRendererRef.current?.getCanvas() ?? null,
+        createAudioTap: () => audioEngineRef.current?.createAudioTap() ?? null,
+      });
+    }
+    // Read the resolution fresh from the store so changes the user made
+    // right before pressing record are honoured (the closure over the
+    // hook value would lag behind any in-flight zustand update).
+    const spec = getRecordingResolutionSpec(
+      useAiSettingsStore.getState().recordingResolution
+    );
+    try {
+      recordingEngineRef.current.start({
+        outputWidth: spec.width,
+        outputHeight: spec.height,
+      });
+      setIsRecording(true);
+    } catch (err) {
+      setRecordingError(
+        err instanceof Error ? err.message : "Failed to start recording"
+      );
+    }
+  }, []);
+
+  const handleStopRecording = useCallback(async () => {
+    const engine = recordingEngineRef.current;
+    if (!engine) return;
+    setIsFinalizingRecording(true);
+    try {
+      const result = await engine.stop();
+      triggerRecordingDownload(result);
+    } catch (err) {
+      setRecordingError(
+        err instanceof Error ? err.message : "Recording failed"
+      );
+    } finally {
+      setIsRecording(false);
+      setIsFinalizingRecording(false);
+    }
+  }, []);
+
+  // Stable getter for the elapsed-time poll inside RecordingControl. Without
+  // useCallback, every parent render swaps the prop identity and forces
+  // RecordingControl's effect to tear down + re-establish its 4 Hz timer.
+  const getRecordingElapsedMs = useCallback(
+    () => recordingEngineRef.current?.getElapsedMs() ?? 0,
+    []
+  );
+
+  // ── DMX console drawer ──────────────────────────────────────────────────
+  // The DMX console used to be a full-width row jammed at the bottom of
+  // the page. With AI preview, performance deck, and stage FX cards in
+  // play it scrolled out of view, so the operator had to chase it during
+  // a set. We promoted it to a slide-up drawer toggled from the SystemsBar
+  // DMX chip — the panel becomes a true layer above the dashboard, never
+  // out of reach, and the dashboard underneath gets its full vertical
+  // budget back.
+  //
+  // Local state (not persisted): a fresh reload should always start with
+  // the drawer closed so the user sees the full canvas immediately. The
+  // DMX status chip stays visible in the top bar regardless.
+  const [dmxOpen, setDmxOpen] = useState(false);
+  const toggleDmxDrawer = useCallback(() => setDmxOpen((v) => !v), []);
+  const closeDmxDrawer = useCallback(() => setDmxOpen(false), []);
+
+  // Esc closes the drawer (only when open — otherwise we'd swallow Escape
+  // for unrelated UI). Skip when the user is typing so a textarea
+  // dismissal doesn't accidentally yank the panel away.
+  useEffect(() => {
+    if (!dmxOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el) {
+        const tag = el.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+        if (el.isContentEditable) return;
+      }
+      e.preventDefault();
+      setDmxOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dmxOpen]);
+
   // Global hotkeys for live performance. Skip when typing in input/textarea/select.
   useEffect(() => {
     const isTyping = () => {
@@ -522,6 +587,17 @@ export function VJApp() {
   const [aiLogs, setAiLogs] = useState<string[]>([]);
   const [aiImageUrl, setAiImageUrl] = useState<string | null>(null);
   const [aiGenTime, setAiGenTime] = useState<number | null>(null);
+  // Per-stage timing breakdown emitted by inference_server.py — surfaces where
+  // the frame budget is going (vae_encode vs transformer vs jpeg vs python glue).
+  // Useful for spotting the next bottleneck without re-instrumenting the worker.
+  const [aiTiming, setAiTiming] = useState<{
+    decode_in_ms?: number;
+    prompt_ms?: number;
+    vae_encode_ms?: number;
+    transformer_plus_decode_ms?: number;
+    jpeg_ms?: number;
+    total_ms?: number;
+  } | null>(null);
   // Server-reported compile status. When the worker has to JIT-compile a new
   // (width, height) shape, every connected GPU is dark for ~150s. We surface
   // that state so the UI can show "compiling 512x288… ~150s" instead of a
@@ -671,6 +747,16 @@ export function VJApp() {
     ) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
+
+      // Drop any in-flight recording before tearing down the audio graph —
+      // otherwise the recorder would keep the now-orphaned audio tracks alive
+      // (silent for the rest of the recording) and dangle a destination node
+      // off the about-to-close AudioContext.
+      if (recordingEngineRef.current?.isRecording()) {
+        recordingEngineRef.current.cancel();
+        setIsRecording(false);
+        setIsFinalizingRecording(false);
+      }
 
       lightingEngineRef.current?.stop();
       lightingEngineRef.current = null;
@@ -957,6 +1043,7 @@ export function VJApp() {
           const data = JSON.parse(frame.message);
           if (data.type === "stats" && data.gen_time_ms) {
             setAiGenTime(data.gen_time_ms);
+            if (data.timing) setAiTiming(data.timing);
             return;
           }
           // Boot-phase messages from inference_server.py: "loading_weights",
@@ -1406,6 +1493,9 @@ export function VJApp() {
     })();
 
     return () => {
+      // Cancel an in-flight recording first so we don't leave the audio
+      // destination node connected when the AudioContext closes underneath.
+      recordingEngineRef.current?.cancel();
       lightingEngineRef.current?.stop();
       visualEngineRef.current?.stop();
       audioEngineRef.current?.destroy();
@@ -1455,8 +1545,6 @@ export function VJApp() {
   // Render
   // ============================================================================
 
-  const sliderFillPct = Math.round((aiKleinAlpha / 0.5) * 100);
-
   return (
     <div className="w-full min-h-screen flex flex-col">
       <SystemsBar
@@ -1464,11 +1552,32 @@ export function VJApp() {
         audioDeviceLabel={selectedDeviceLabel}
         aiStatus={aiStatus}
         aiBackend={aiBackend}
+        onBackendChange={(b) => {
+          // Switching backend tears down the current channel — auto-connect
+          // (if on) re-opens against the new URL on the next render.
+          void aiTransport.stop();
+          setAiBackend(b);
+        }}
+        aiAutoConnect={aiAutoConnect}
+        onAutoConnectChange={setAiAutoConnect}
+        onConnect={() => void aiTransport.start()}
+        onDisconnect={() => void aiTransport.stop()}
         aiGenTimeMs={aiStatus === "connected" ? aiGenTime : null}
+        aiTiming={aiStatus === "connected" ? aiTiming : null}
         dmxStatus={dmxStatus}
         dmxFixtureCount={fixtures.length}
         dmxActiveCount={dmxActiveCount}
         lightingEnabled={lightingEnabled}
+        dmxOpen={dmxOpen}
+        onToggleDmx={toggleDmxDrawer}
+        isRecording={isRecording}
+        isFinalizingRecording={isFinalizingRecording}
+        recordingSupported={recordingSupported}
+        getRecordingElapsedMs={getRecordingElapsedMs}
+        onStartRecording={handleStartRecording}
+        onStopRecording={handleStopRecording}
+        recordingResolution={recordingResolution}
+        onRecordingResolutionChange={setRecordingResolution}
       />
 
       {/* Error banner */}
@@ -1478,608 +1587,155 @@ export function VJApp() {
         </div>
       )}
 
-      {/* Dashboard grid — 12 cols at wide width, reflows at narrow.
-          Tight gap + padding so everything fits in one viewport. */}
-      <div className="flex-1 w-full grid grid-cols-1 xl:grid-cols-12 gap-2 p-2">
-        {/* ============== LEFT COL: waveform + sources ============== */}
+      {/* Recording errors get their own dismissible banner so the audio
+          error banner above stays focused on its own concern. Click the
+          message to clear it once the user has read it. */}
+      {recordingError && (
+        <button
+          type="button"
+          onClick={() => setRecordingError("")}
+          className="mx-4 mt-3 text-left text-sm font-mono text-[color:var(--vj-error)] bg-[color-mix(in_srgb,var(--vj-error)_10%,transparent)] border border-[color:var(--vj-error)] rounded px-3 py-2 shadow-[0_0_18px_-6px_var(--vj-error)]"
+          title="Click to dismiss"
+        >
+          ⚠ recording: {recordingError}
+        </button>
+      )}
+
+      {/* Top section — INPUT (col-3, narrow) + MAIN (col-9, the working
+          surface). Stage FX sits in the main column under the Performance
+          Deck so it stays one glance away without eating its own column.
+          Lighting/DMX moves below the grid as a full-width row — its
+          fixture list grows tall and the wide footprint actually helps. */}
+      <div className="flex-1 w-full grid grid-cols-1 xl:grid-cols-12 gap-x-4 gap-y-2 p-2">
         <section className="xl:col-span-3 flex flex-col gap-2 min-w-0">
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <PanelHeader
-              title="Waveform / Source"
-              actions={
-                <span
-                  className="flex items-center gap-1.5 text-[10px] text-[color:var(--vj-ink-dim)] normal-case h-full"
-                  title={`Audio status: ${status}`}
-                >
-                  <span
-                    className="vj-dot"
-                    style={{
-                      color:
-                        status === "running"
-                          ? "var(--vj-live)"
-                          : status === "error"
-                          ? "var(--vj-error)"
-                          : "var(--vj-info)",
-                    }}
-                  />
-                  <span className="tracking-wider uppercase">
-                    {status === "running" ? "live" : status}
-                  </span>
-                </span>
-              }
-            />
-
-            <div className="vj-canvas-frame aspect-[4/1] w-full">
-              <canvas
-                ref={canvasRef}
-                className="w-full h-full"
-                style={{ imageRendering: "pixelated" }}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Scene">
-                <select
-                  value={currentSceneId}
-                  onChange={(e) => handleSceneChange(e.target.value)}
-                  className="vj-input"
-                >
-                  {SCENES.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field
-                label="Audio In"
-                hint={
-                  systemAudioSupported
-                    ? "Mic / line-in device, or 🖥 System audio (browser will prompt to share a tab/window/screen with audio)"
-                    : "Pick which audio input drives the visuals"
-                }
-              >
-                <select
-                  value={selectedDeviceId}
-                  onChange={(e) => handleDeviceChange(e.target.value)}
-                  className="vj-input"
-                >
-                  {systemAudioSupported && (
-                    <option value={SYSTEM_AUDIO_VALUE}>
-                      🖥 System audio (share screen/tab)
-                    </option>
-                  )}
-                  <option value="">Default device</option>
-                  {devices.map((d) => (
-                    <option key={d.deviceId} value={d.deviceId}>
-                      {d.label}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-            </div>
-          </div>
-
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <PanelHeader
-              title="Audio Features"
-              actions={
-                <button
-                  type="button"
-                  onClick={() => setShowDebug(!showDebug)}
-                  aria-pressed={showDebug}
-                  className={`vj-icon-btn ${showDebug ? "vj-icon-btn--on" : ""}`}
-                  title="Hides the panel and stops the polling timer."
-                >
-                  {showDebug ? "ON" : "OFF"}
-                </button>
-              }
-            />
-            {showDebug && <AudioDebugPanel features={debugFeatures} />}
-          </div>
-        </section>
-
-        {/* ============== CENTER COL: AI output + prompt ============== */}
-        <section className="xl:col-span-5 flex flex-col gap-2 min-w-0">
-          <div className="vj-panel p-2 flex flex-col gap-2 flex-1">
-            <PanelHeader
-              title="AI Output"
-              actions={
-                <button
-                  type="button"
-                  onClick={() => setAiSendFrames(!aiSendFrames)}
-                  disabled={!aiTransport.isConnected()}
-                  className={`vj-btn ${aiSendFrames ? "vj-btn--live" : "vj-btn--accent"}`}
-                  title={
-                    !aiTransport.isConnected()
-                      ? "Connect AI first"
-                      : "Toggle generation (Space)"
-                  }
-                >
-                  {aiSendFrames ? "■ stop" : "▶ generate"}
-                </button>
-              }
-            />
-
-            {/* Preview comes first so the picture is what your eye lands on
-                when the card opens — settings (resolution, klein params)
-                live below it, where they don't push the visual down. The
-                WebGL StageRenderer applies the same sharpen pass that runs
-                on /vj/stage, so what you see here is what the projector
-                sees (the .vj-canvas-frame ::after CSS overlay supplies the
-                matching scanline+vignette FX). The placeholder text
-                overlays the canvas until a frame arrives.
-
-                The frame is locked to 16:9 regardless of output resolution.
-                Switching to 9:16 / 1:1 would otherwise blow the card up to
-                a tower or a square that pushes everything else off-screen.
-                Instead the canvas's `object-fit: contain` shrinks the
-                rendered bitmap inside the fixed frame — vertical content
-                shows as a tall rectangle centered with black side bars,
-                exactly as it'll appear on a 16:9 projector. */}
-            <div className="vj-canvas-frame relative flex items-center justify-center w-full aspect-video">
-              <StageRenderer
-                ref={previewRendererRef}
-                sharpen={aiStagePixelate ? 0 : aiStageSharpen}
-                pixelate={aiStagePixelate ? aiStagePixelateSize : 0}
-                className="w-full h-full"
-                style={{ objectFit: "contain" }}
-              />
-              {aiCompile && (
-                <CompileOverlay
-                  phase={aiCompile.phase}
-                  width={aiCompile.width}
-                  height={aiCompile.height}
-                  startedAt={aiCompile.started_at}
-                  estSeconds={aiCompile.est_seconds ?? 150}
-                  iter={aiCompile.iter}
-                  totalIters={aiCompile.total_iters}
-                />
-              )}
-              {!aiImageUrl && !aiCompile && (
-                <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
-                  {aiStatus === "connected" ? (
-                    aiServer && aiServer.readyCount < aiServer.workerCount ? (
-                      // Server reachable but workers still booting (loading
-                      // weights / fp8 / compile). Show what's happening so the
-                      // canvas isn't a silent void.
-                      <span>
-                        <span className="text-[color:var(--vj-info)]">
-                          preparing workers
-                        </span>
-                        <br />
-                        <span className="text-[color:var(--vj-accent)] tabular-nums">
-                          {aiServer.readyCount} / {aiServer.workerCount} ready
-                        </span>
-                        <br />
-                        <span className="text-[10px] mt-1 inline-block normal-case tracking-normal">
-                          loading model weights and JIT-compiling kernels —
-                          ~3 min on cold boot, then frames will start streaming
-                        </span>
-                      </span>
-                    ) : (
-                      <span>
-                        <span className="text-[color:var(--vj-info)]">
-                          connected
-                        </span>
-                        <br />
-                        press ▶ generate or hit space
-                      </span>
-                    )
-                  ) : aiStatus === "connecting" ? (
-                    <span className="text-[color:var(--vj-info)]">
-                      negotiating webrtc…
-                    </span>
-                  ) : (
-                    <span>
-                      connect backend in
-                      <br />
-                      <span className="text-[color:var(--vj-accent)]">
-                        right panel ↗
-                      </span>
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Sub-toolbar — settings under the picture so the canvas owns
-                the top of the card. Resolution + (klein only) α slider,
-                steps, match-capture — all live cues you'll touch mid-set. */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <ResPicker
-                width={aiOutputWidth}
-                height={aiOutputHeight}
-                onPick={setAiOutputSize}
-              />
-              {aiBackend === "klein" && (
-                <div
-                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)]"
-                  title="0 = pure prompt · 0.5 = waveform dominates · ↑/↓ to adjust"
-                >
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-                    α
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={0.5}
-                    step={0.01}
-                    value={aiKleinAlpha}
-                    onChange={(e) => setAiKleinAlpha(Number(e.target.value))}
-                    className="vj-range w-24"
-                    style={
-                      {
-                        ["--vj-range-fill" as string]: `${sliderFillPct}%`,
-                      } as React.CSSProperties
-                    }
-                  />
-                  <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-accent)] w-9 text-right">
-                    {aiKleinAlpha.toFixed(2)}
-                  </span>
-                </div>
-              )}
-              {aiBackend === "klein" && (
-                <label
-                  className="flex items-center gap-1.5 px-2 py-1 rounded border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel-2)] text-[10px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]"
-                  title="Klein steps — 1 fastest, 2 sweet spot, 4 max quality"
-                >
-                  <span>steps</span>
-                  <select
-                    value={aiKleinSteps}
-                    onChange={(e) => setAiKleinSteps(Number(e.target.value))}
-                    className="bg-transparent border-0 outline-none text-[color:var(--vj-info)] tabular-nums normal-case font-mono py-0 pr-1"
-                  >
-                    <option value={1}>1</option>
-                    <option value={2}>2</option>
-                    <option value={3}>3</option>
-                    <option value={4}>4</option>
-                  </select>
-                </label>
-              )}
-              {aiBackend === "klein" && aiCaptureSize !== aiOutputLong && (
-                <button
-                  onClick={() => setAiCaptureSize(aiOutputLong)}
-                  className="vj-btn vj-btn--accent"
-                  title={`Match capture to output long side (${aiOutputLong}) for sharper Klein output`}
-                >
-                  match → {aiOutputLong}
-                </button>
-              )}
-            </div>
-
-            <PromptDock
-              activePrompt={aiPrompt}
-              onSetPrompt={setAiPrompt}
-            />
-
-            <HotkeyBoard
-              presets={aiPromptPresets}
-              activePrompt={aiPrompt}
-              onFirePreset={firePreset}
-              onUpdatePreset={updatePromptPreset}
-              onRandom={fireRandomPreset}
-              onFireFog={triggerFog}
-              alpha={aiBackend === "klein" ? aiKleinAlpha : undefined}
-              onAlphaDelta={
-                aiBackend === "klein" ? adjustAlpha : undefined
-              }
-            />
-          </div>
-        </section>
-
-        {/* ============== RIGHT COL: AI settings + lighting ============== */}
-        {/* ============== RIGHT COL: AI backend + Lighting ============== */}
-        <aside className="xl:col-span-4 flex flex-col gap-2 min-w-0">
-          {/* AI Backend — connection wiring + per-frame params. Klein-only
-              live controls (α, steps, match-capture) live on the AI Output
-              toolbar; Stage FX has its own card below. */}
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <PanelHeader
-              title="AI Backend"
-              actions={
-                <>
-                  <label
-                    className="flex items-center gap-1.5 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider h-full"
-                    title="Auto-connect on page load and on backend switch"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={aiAutoConnect}
-                      onChange={(e) => setAiAutoConnect(e.target.checked)}
-                      className="vj-check"
-                    />
-                    auto
-                  </label>
-                  {aiStatus === "connected" || aiStatus === "connecting" ? (
-                    <button
-                      onClick={() => void aiTransport.stop()}
-                      className="vj-btn vj-btn--danger"
-                      title="Close the WebRTC channel"
-                    >
-                      ✕ disconnect
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => void aiTransport.start()}
-                      className="vj-btn vj-btn--live"
-                      title="Open WebRTC channel to the AI backend"
-                    >
-                      ▶ connect
-                    </button>
-                  )}
-                </>
-              }
-            />
-
-            <select
-              value={aiBackend}
-              onChange={(e) => {
-                void aiTransport.stop();
-                setAiBackend(e.target.value as AiBackend);
-              }}
-              className="vj-input"
-              title={AI_BACKEND_LABELS[aiBackend]}
-            >
-              {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
-                <option key={k} value={k}>
-                  {AI_BACKEND_LABELS[k]}
-                </option>
-              ))}
-            </select>
-
-            {/* Per-frame params — two columns, dense. Seed is grouped with
-                its randomize button so the pair reads as one control. */}
-            <div className="grid grid-cols-2 gap-2">
-              <Field label="Capture px">
-                <select
-                  value={aiCaptureSize}
-                  onChange={(e) => setAiCaptureSize(Number(e.target.value))}
-                  className="vj-input"
-                  title={
-                    aiBackend === "klein"
-                      ? "Klein: match to output long side for best quality"
-                      : "Client capture resolution"
-                  }
-                >
-                  <option value={64}>64 · fastest</option>
-                  <option value={128}>128</option>
-                  <option value={256}>256</option>
-                  <option value={512}>512</option>
-                </select>
-              </Field>
-              <Field label="Target fps">
-                <select
-                  value={aiFrameRate}
-                  onChange={(e) => setAiFrameRate(Number(e.target.value))}
-                  className="vj-input"
-                >
-                  <option value={10}>10 fps</option>
-                  <option value={20}>20 fps</option>
-                  <option value={30}>30 fps</option>
-                  <option value={60}>60 fps</option>
-                </select>
-              </Field>
-
-              <Field label="Seed">
-                <div className="grid grid-cols-[1fr_auto] gap-1">
-                  <input
-                    type="number"
-                    value={aiSeed}
-                    onChange={(e) =>
-                      setAiSeed(Math.max(0, Math.floor(Number(e.target.value))))
-                    }
-                    className="vj-input tabular-nums"
-                  />
-                  <button
-                    onClick={() => setAiSeed(Math.floor(Math.random() * 1_000_000))}
-                    className="vj-btn"
-                    title="Randomize seed"
-                  >
-                    ⟲
-                  </button>
-                </div>
-              </Field>
-              <Field label="Display upscale">
-                <select
-                  value={aiUpscaleMode}
-                  onChange={(e) => setAiUpscaleMode(e.target.value as UpscaleMode)}
-                  className="vj-input"
-                  title="Interpolation when the AI output is scaled up for display"
-                >
-                  <option value="lanczos">Lanczos (sharp)</option>
-                  <option value="bilinear">Bilinear (soft)</option>
-                </select>
-              </Field>
-            </div>
-
-            {/* Diagnostics live behind a disclosure so they don't crowd the
-                live-controls in the default view. */}
-            <details className="text-xs">
-              <summary className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] cursor-pointer hover:text-[color:var(--vj-info)]">
-                diagnostics ({aiLogs.length} log{aiLogs.length === 1 ? "" : "s"})
-              </summary>
-              <div className="mt-2 flex flex-col gap-2">
-                <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
-                  <input
-                    type="checkbox"
-                    checked={aiShowCaptureDebug}
-                    onChange={(e) => setAiShowCaptureDebug(e.target.checked)}
-                    className="vj-check"
-                  />
-                  show capture preview
-                </label>
-                {aiShowCaptureDebug && (
-                  <div className="flex flex-col gap-1 rounded border border-[color:var(--vj-edge-hot)] bg-black/50 p-2">
-                    <div className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
-                      sending {aiCaptureSize} → {aiOutputWidth}×{aiOutputHeight}
-                    </div>
-                    <canvas
-                      ref={aiDebugCanvasRef}
-                      width={aiCaptureSize}
-                      height={aiCaptureSize}
-                      className="rounded bg-black self-center"
-                      style={{
-                        width: 160,
-                        height: (160 * aiOutputHeight) / aiOutputWidth,
-                        imageRendering: "pixelated",
-                      }}
-                    />
-                  </div>
-                )}
-                <div className="max-h-28 overflow-auto font-mono text-[11px] text-[color:var(--vj-ink-dim)] bg-black/40 rounded p-2">
-                  {aiLogs.length === 0 ? (
-                    <div className="opacity-50">(no messages)</div>
-                  ) : (
-                    aiLogs.map((line, idx) => (
-                      <div key={idx} className="whitespace-pre-wrap">
-                        {line}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            </details>
-          </div>
-
-          {/* Stage FX — its own card. Sharpen runs as a WebGL unsharp-mask
-              pass on /vj/stage; scanlines + vignette are CSS overlays
-              matching the preview frame. Header carries the apply-target
-              hint so users see at a glance this isn't the preview. */}
-          <div className="vj-panel p-2 flex flex-col gap-2">
-            <PanelHeader
-              title="Stage FX"
-              actions={
-                <span className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
-                  /vj/stage
-                </span>
-              }
-            />
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] w-16">
-                sharpen
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={10}
-                step={0.1}
-                value={aiStageSharpen}
-                onChange={(e) => setAiStageSharpen(Number(e.target.value))}
-                className="vj-range vj-range--tight"
-                style={
-                  {
-                    ["--vj-range-fill" as string]: `${(aiStageSharpen / 10) * 100}%`,
-                  } as React.CSSProperties
-                }
-                title="WebGL unsharp-mask strength (0 = off, ~1 mild, 10 = aggressive)"
-              />
-              <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right ml-auto">
-                {aiStageSharpen.toFixed(1)}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
-                <input
-                  type="checkbox"
-                  checked={aiStageScanlines}
-                  onChange={(e) => setAiStageScanlines(e.target.checked)}
-                  className="vj-check"
-                />
-                scanlines
-              </label>
-              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider">
-                <input
-                  type="checkbox"
-                  checked={aiStageVignette}
-                  onChange={(e) => setAiStageVignette(e.target.checked)}
-                  className="vj-check"
-                />
-                vignette
-              </label>
-            </div>
-            {/* Pixelate is mutually exclusive with sharpen (sharpen on
-                quantised blocks just amplifies block-edge step). When ON,
-                StageRenderer skips the sharpen pass entirely. */}
-            <div className="flex items-center gap-2">
-              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider w-16">
-                <input
-                  type="checkbox"
-                  checked={aiStagePixelate}
-                  onChange={(e) => setAiStagePixelate(e.target.checked)}
-                  className="vj-check"
-                />
-                pixelate
-              </label>
-              <input
-                type="range"
-                min={2}
-                max={32}
-                step={1}
-                value={aiStagePixelateSize}
-                onChange={(e) => setAiStagePixelateSize(Number(e.target.value))}
-                disabled={!aiStagePixelate}
-                className="vj-range vj-range--tight"
-                style={
-                  {
-                    ["--vj-range-fill" as string]: `${((aiStagePixelateSize - 2) / 30) * 100}%`,
-                    opacity: aiStagePixelate ? 1 : 0.3,
-                  } as React.CSSProperties
-                }
-                title="Pixelate block size in source pixels (2..32)"
-              />
-              <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right ml-auto">
-                {aiStagePixelateSize}px
-              </span>
-            </div>
-          </div>
-
-          {/* Fog — own card so the toggle button + hotkey are one glance
-              away. Sits above the Lighting card because fog state is a live
-              cue and shouldn't be hidden inside a fixture list. Hidden when
-              the master DMX/lighting switch is off — fog rides on a DMX
-              channel, so it's meaningless without the universe live. */}
-          {lightingEnabled && (
-            <FogControl
-              intensity={fogIntensity}
-              onSetIntensity={setFogIntensity}
-              onToggle={triggerFog}
-              isActive={() =>
-                lightingEngineRef.current?.isFogActive() ?? false
-              }
-            />
-          )}
-
-          {/* Lighting / DMX — its own internal master toggle controls the
-              entire card body. Status comes from the SystemsBar so this
-              card jumps straight to the action when enabled. */}
-          <LightingPanel
-            enabled={lightingEnabled}
-            onSetEnabled={setLightingEnabled}
-            dmxStatus={dmxStatus}
-            dmxSupported={dmxSupported}
-            onDmxConnect={handleDmxConnect}
-            onDmxDisconnect={handleDmxDisconnect}
-            onDmxReconnect={handleDmxReconnect}
-            selectedProfileId={selectedProfileId}
-            onProfileSelect={setSelectedProfileId}
-            onAddFixture={handleAddFixture}
-            fixtures={fixtures}
-            fixtureValues={fixtureValues}
-            onFixtureAddressChange={handleFixtureAddressChange}
-            onFixtureStrobeModeChange={handleStrobeModeChange}
-            onFixtureStrobeThresholdChange={handleStrobeThresholdChange}
-            onFixtureStrobeMaxChange={handleStrobeMaxChange}
-            onFixtureColorModeChange={handleColorModeChange}
-            onFixtureSolidColorChange={handleSolidColorChange}
-            onFixtureProfileChange={handleFixtureProfileChange}
-            onFixtureRemove={handleRemoveFixture}
-            onFixtureDimmerModeChange={handleDimmerModeChange}
-            onFixtureManualDimmerChange={handleManualDimmerChange}
+          <WaveformSourceCard
+            canvasRef={canvasRef}
+            status={status}
+            scenes={SCENES}
+            currentSceneId={currentSceneId}
+            onSceneChange={handleSceneChange}
+            systemAudioSupported={systemAudioSupported}
+            systemAudioValue={SYSTEM_AUDIO_VALUE}
+            selectedDeviceId={selectedDeviceId}
+            devices={devices}
+            onDeviceChange={handleDeviceChange}
+            showDebug={showDebug}
+            setShowDebug={setShowDebug}
+            debugFeatures={debugFeatures}
           />
-        </aside>
+
+          <StageFxCard
+            sharpen={aiStageSharpen}
+            onSharpenChange={setAiStageSharpen}
+            scanlines={aiStageScanlines}
+            onScanlinesChange={setAiStageScanlines}
+            vignette={aiStageVignette}
+            onVignetteChange={setAiStageVignette}
+            pixelate={aiStagePixelate}
+            onPixelateChange={setAiStagePixelate}
+            pixelateSize={aiStagePixelateSize}
+            onPixelateSizeChange={setAiStagePixelateSize}
+          />
+        </section>
+
+        <section className="xl:col-span-9 flex flex-col gap-2 min-w-0">
+          <AiConsoleCard
+            aiTransport={aiTransport}
+            aiStatus={aiStatus}
+            previewRendererRef={previewRendererRef}
+            aiImageUrl={aiImageUrl}
+            aiCompile={aiCompile}
+            aiServer={aiServer}
+            aiSendFrames={aiSendFrames}
+            onSendFramesChange={setAiSendFrames}
+            aiOutputWidth={aiOutputWidth}
+            aiOutputHeight={aiOutputHeight}
+            onOutputSizeChange={setAiOutputSize}
+            aiBackendKlein={aiBackend === "klein"}
+            aiKleinAlpha={aiKleinAlpha}
+            onKleinAlphaChange={setAiKleinAlpha}
+            aiKleinSteps={aiKleinSteps}
+            onKleinStepsChange={setAiKleinSteps}
+            aiCaptureSize={aiCaptureSize}
+            onCaptureSizeChange={setAiCaptureSize}
+            aiOutputLong={aiOutputLong}
+            aiStageSharpen={aiStageSharpen}
+            aiStagePixelate={aiStagePixelate}
+            aiStagePixelateSize={aiStagePixelateSize}
+            aiPrompt={aiPrompt}
+            onPromptChange={setAiPrompt}
+            aiFrameRate={aiFrameRate}
+            onFrameRateChange={setAiFrameRate}
+            aiSeed={aiSeed}
+            onSeedChange={setAiSeed}
+            aiUpscaleMode={aiUpscaleMode}
+            onUpscaleModeChange={setAiUpscaleMode}
+            aiShowCaptureDebug={aiShowCaptureDebug}
+            onShowCaptureDebugChange={setAiShowCaptureDebug}
+            aiDebugCanvasRef={aiDebugCanvasRef}
+            aiLogs={aiLogs}
+          />
+
+          <PerformanceDeckCard
+            presets={aiPromptPresets}
+            activePrompt={aiPrompt}
+            onFirePreset={firePreset}
+            onUpdatePreset={updatePromptPreset}
+            onRandom={fireRandomPreset}
+            onFireFog={triggerFog}
+            alpha={aiBackend === "klein" ? aiKleinAlpha : undefined}
+            onAlphaDelta={aiBackend === "klein" ? adjustAlpha : undefined}
+          />
+        </section>
       </div>
+
+      {/* DMX Console Drawer — slide-up surface, toggled via the SystemsBar
+          DMX chip. Rendered after the dashboard so its fixed-position
+          drawer overlays everything else, but underneath the sticky
+          SystemsBar (z-30 vs drawer z-25) so the chip stays clickable
+          when the drawer is open. We always render the markup (toggling
+          `--closed` class) so the slide-out animation can play; the
+          aria-hidden state and pointer-events:none on the closed class
+          keep it inert. */}
+      <aside
+        id="vj-dmx-drawer"
+        role="dialog"
+        aria-modal="false"
+        aria-label="DMX lighting console"
+        aria-hidden={!dmxOpen}
+        className={`vj-drawer ${dmxOpen ? "" : "vj-drawer--closed"}`}
+      >
+        <LightingPanel
+          enabled={lightingEnabled}
+          onSetEnabled={setLightingEnabled}
+          dmxStatus={dmxStatus}
+          dmxSupported={dmxSupported}
+          onDmxConnect={handleDmxConnect}
+          onDmxDisconnect={handleDmxDisconnect}
+          onDmxReconnect={handleDmxReconnect}
+          selectedProfileId={selectedProfileId}
+          onProfileSelect={setSelectedProfileId}
+          onAddFixture={handleAddFixture}
+          fixtures={fixtures}
+          fixtureValues={fixtureValues}
+          dmxActiveCount={dmxActiveCount}
+          onFixtureAddressChange={handleFixtureAddressChange}
+          onFixtureStrobeModeChange={handleStrobeModeChange}
+          onFixtureStrobeThresholdChange={handleStrobeThresholdChange}
+          onFixtureStrobeMaxChange={handleStrobeMaxChange}
+          onFixtureColorModeChange={handleColorModeChange}
+          onFixtureSolidColorChange={handleSolidColorChange}
+          onFixtureProfileChange={handleFixtureProfileChange}
+          onFixtureRemove={handleRemoveFixture}
+          onFixtureDimmerModeChange={handleDimmerModeChange}
+          onFixtureManualDimmerChange={handleManualDimmerChange}
+          fogIntensity={fogIntensity}
+          onFogIntensityChange={setFogIntensity}
+          onFogToggle={triggerFog}
+          isFogActive={() => lightingEngineRef.current?.isFogActive() ?? false}
+          onClose={closeDmxDrawer}
+        />
+      </aside>
     </div>
   );
 }

@@ -3,8 +3,12 @@
 import type { AiTransportStatus } from "@/src/lib/ai/transport";
 import {
   AI_BACKEND_LABELS,
+  AI_BACKEND_URLS,
+  RECORDING_RESOLUTIONS,
   type AiBackend,
+  type RecordingResolution,
 } from "@/src/lib/stores/ai-settings-store";
+import { RecordingControl } from "./RecordingControl";
 
 type Status = "idle" | "requesting" | "running" | "error";
 type DmxStatus = "disconnected" | "connecting" | "connected" | "unsupported";
@@ -14,14 +18,49 @@ interface SystemsBarProps {
   audioDeviceLabel?: string;
   aiStatus: AiTransportStatus;
   aiBackend: AiBackend;
+  /** Switch backend (also closes any open WebRTC channel — caller's job). */
+  onBackendChange: (b: AiBackend) => void;
+  aiAutoConnect: boolean;
+  onAutoConnectChange: (v: boolean) => void;
+  /** Open the WebRTC channel. Bound to the connect button. */
+  onConnect: () => void;
+  /** Close the WebRTC channel. Bound to the disconnect button. */
+  onDisconnect: () => void;
   aiGenTimeMs: number | null;
+  /** Per-stage timing breakdown from inference_server.py. When present,
+   *  hover the AI block to see vae/transformer/jpeg ms split — useful for
+   *  spotting the next bottleneck without re-instrumenting the worker. */
+  aiTiming?: {
+    decode_in_ms?: number;
+    prompt_ms?: number;
+    vae_encode_ms?: number;
+    transformer_plus_decode_ms?: number;
+    jpeg_ms?: number;
+    total_ms?: number;
+  } | null;
   dmxStatus: DmxStatus;
   dmxFixtureCount: number;
   dmxActiveCount: number;
   /** Master DMX/lighting switch — when false the DMX block goes muted "off". */
   lightingEnabled: boolean;
-  onHideUi: () => void;
-  hideUi: boolean;
+  /** Whether the DMX console drawer is currently open. Drives the chevron
+   *  rotation and the magenta accent state on the chip. */
+  dmxOpen: boolean;
+  /** Toggle the DMX console drawer open/closed. */
+  onToggleDmx: () => void;
+
+  // ── Recording — session-output controls ─────────────────────────────
+  // Promoted out of the AI Console card so it sits next to the other
+  // global session actions (Stage ↗). The card itself is a per-cue
+  // surface; capturing the whole session belongs at the bar level.
+  isRecording: boolean;
+  isFinalizingRecording: boolean;
+  recordingSupported: boolean;
+  getRecordingElapsedMs: () => number;
+  onStartRecording: () => void;
+  onStopRecording: () => void;
+  recordingResolution: RecordingResolution;
+  onRecordingResolutionChange: (value: RecordingResolution) => void;
 }
 
 /**
@@ -33,13 +72,27 @@ export function SystemsBar({
   audioDeviceLabel,
   aiStatus,
   aiBackend,
+  onBackendChange,
+  aiAutoConnect,
+  onAutoConnectChange,
+  onConnect,
+  onDisconnect,
   aiGenTimeMs,
+  aiTiming,
   dmxStatus,
   dmxFixtureCount,
   dmxActiveCount,
   lightingEnabled,
-  onHideUi,
-  hideUi,
+  dmxOpen,
+  onToggleDmx,
+  isRecording,
+  isFinalizingRecording,
+  recordingSupported,
+  getRecordingElapsedMs,
+  onStartRecording,
+  onStopRecording,
+  recordingResolution,
+  onRecordingResolutionChange,
 }: SystemsBarProps) {
   const audioTone = audioStatus === "error"
     ? "error"
@@ -89,52 +142,156 @@ export function SystemsBar({
           }
         />
 
-        <SysBlock
-          label={aiBackend}
-          tone={aiTone}
-          value={formatAi(aiStatus, aiGenTimeMs)}
-          title={AI_BACKEND_LABELS[aiBackend]}
-        />
+        {/* AI block — status pill + backend dropdown + auto + connect.
+            Promoted from the AI Console card header so the most-touched
+            session controls live next to their status indicator. */}
+        <div className="flex items-center gap-2">
+          <SysBlock
+            label="AI"
+            tone={aiTone}
+            value={formatAi(aiStatus, aiGenTimeMs)}
+            title={
+              aiTiming
+                ? `${AI_BACKEND_LABELS[aiBackend]}\n` +
+                  `vae enc: ${(aiTiming.vae_encode_ms ?? 0).toFixed(1)} ms\n` +
+                  `transformer+vae dec: ${(aiTiming.transformer_plus_decode_ms ?? 0).toFixed(1)} ms\n` +
+                  `jpeg: ${(aiTiming.jpeg_ms ?? 0).toFixed(1)} ms\n` +
+                  `decode in: ${(aiTiming.decode_in_ms ?? 0).toFixed(1)} ms\n` +
+                  `prompt: ${(aiTiming.prompt_ms ?? 0).toFixed(1)} ms\n` +
+                  `total: ${(aiTiming.total_ms ?? 0).toFixed(1)} ms`
+                : AI_BACKEND_LABELS[aiBackend]
+            }
+          />
+          <select
+            value={aiBackend}
+            onChange={(e) => onBackendChange(e.target.value as AiBackend)}
+            className="vj-input vj-input--bar"
+            title={`Backend · ${AI_BACKEND_LABELS[aiBackend]}`}
+          >
+            {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
+              <option key={k} value={k}>
+                {AI_BACKEND_LABELS[k]}
+              </option>
+            ))}
+          </select>
+          <label
+            className="flex items-center gap-1 normal-case tracking-normal text-[color:var(--vj-ink-dim)]"
+            title="Auto-connect on page load and on backend switch"
+          >
+            <input
+              type="checkbox"
+              checked={aiAutoConnect}
+              onChange={(e) => onAutoConnectChange(e.target.checked)}
+              className="vj-check"
+            />
+            auto
+          </label>
+          {aiStatus === "connected" || aiStatus === "connecting" ? (
+            <button
+              onClick={onDisconnect}
+              className="vj-btn vj-btn--danger vj-btn--bar"
+              title="Close the WebRTC channel"
+            >
+              ✕ disc.
+            </button>
+          ) : (
+            <button
+              onClick={onConnect}
+              className="vj-btn vj-btn--live vj-btn--bar"
+              title="Open WebRTC channel to the AI backend"
+            >
+              ▶ connect
+            </button>
+          )}
+        </div>
 
-        <SysBlock
-          label="DMX"
-          tone={dmxTone}
-          value={
-            !lightingEnabled
-              ? "off"
-              : dmxStatus === "unsupported"
-              ? "no webusb"
-              : dmxStatus === "connected"
-              ? `${dmxActiveCount}/${dmxFixtureCount}`
-              : dmxStatus
+        {/* DMX chip — clickable surface that toggles the console drawer.
+            When the drawer is open it adopts a magenta accent (matching the
+            drawer's top edge); when fixtures are actively driving DMX the
+            chip pulses softly so the operator catches it peripherally. */}
+        <button
+          type="button"
+          onClick={onToggleDmx}
+          aria-expanded={dmxOpen}
+          aria-controls="vj-dmx-drawer"
+          className={`vj-sys-btn ${
+            lightingEnabled && dmxActiveCount > 0 && !dmxOpen
+              ? "vj-sys-btn--live"
+              : ""
+          }`}
+          title={
+            dmxOpen
+              ? "Close DMX console (Esc)"
+              : `Open DMX console · ${dmxFixtureCount} fixture${
+                  dmxFixtureCount === 1 ? "" : "s"
+                }${dmxActiveCount > 0 ? `, ${dmxActiveCount} active` : ""}`
           }
-        />
+        >
+          <DmxChipBody
+            tone={dmxTone}
+            value={
+              !lightingEnabled
+                ? "off"
+                : dmxStatus === "unsupported"
+                ? "no webusb"
+                : dmxStatus === "connected"
+                ? `${dmxActiveCount}/${dmxFixtureCount}`
+                : dmxStatus
+            }
+          />
+          <svg
+            className="vj-chev"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M2 4 L5 7 L8 4" />
+          </svg>
+        </button>
 
         <div className="ml-auto flex items-center gap-2">
-          <span
-            className="text-[9px] text-[color:var(--vj-ink-dim)] normal-case tracking-normal hidden md:inline"
-            title="Hotkeys: 1-9 fire preset (re-rolls seed) · Space random preset (re-rolls seed) · ↑↓ klein alpha ±0.02 · ←→ klein alpha ±0.01 · H hide UI"
+          {/* Recording — session output. Resolution dropdown locks while a
+              clip is in progress (can't change mid-recording without
+              restarting the encoder). The shortLabel ("1K"/"2K"/"4K")
+              keeps the bar dense; full label is in the option text. */}
+          <select
+            value={recordingResolution}
+            onChange={(e) =>
+              onRecordingResolutionChange(e.target.value as RecordingResolution)
+            }
+            disabled={isRecording || isFinalizingRecording}
+            className="vj-input vj-input--bar"
+            title="Recording output resolution. Source canvas is composited onto a fresh offscreen canvas at this size — letterboxed if AI source aspect doesn't match 16:9."
           >
-            <span className="text-[color:var(--vj-info)]">1-9</span> presets ·{" "}
-            <span className="text-[color:var(--vj-info)]">Space</span> random ·{" "}
-            <span className="text-[color:var(--vj-info)]">H</span> hide
-          </span>
+            {RECORDING_RESOLUTIONS.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.shortLabel}
+              </option>
+            ))}
+          </select>
+          <RecordingControl
+            isRecording={isRecording}
+            isSupported={recordingSupported}
+            getElapsedMs={getRecordingElapsedMs}
+            onStart={onStartRecording}
+            onStop={onStopRecording}
+            isFinalizing={isFinalizingRecording}
+            compact
+          />
+
           <a
             href="/vj/stage"
             target="_blank"
             rel="noreferrer"
-            className="vj-btn"
+            className="vj-btn vj-btn--bar"
             title="Open audience-only fullscreen output"
           >
             Stage ↗
           </a>
-          <button
-            onClick={onHideUi}
-            className="vj-btn vj-btn--accent"
-            title="Fullscreen the AI output only (hotkey: H)"
-          >
-            {hideUi ? "Show UI" : "Hide UI"}
-          </button>
         </div>
       </div>
     </header>
@@ -158,7 +315,7 @@ function SysBlock({
   return (
     <div className="flex items-center gap-2" title={title ?? `${label}: ${value}`}>
       <span
-        className={tone === "muted" ? "vj-dot vj-dot--static" : "vj-dot"}
+        className="vj-dot"
         style={{ color }}
         aria-hidden
       />
@@ -170,6 +327,28 @@ function SysBlock({
         {value}
       </span>
     </div>
+  );
+}
+
+/**
+ * Inner status row for the DMX chip — same visual language as SysBlock but
+ * stripped of the wrapping div so it can sit inside a <button> without
+ * doubling up roles. Tone-coloured dot + label + value, no extra click
+ * target (the surrounding .vj-sys-btn is the click surface).
+ */
+function DmxChipBody({ tone, value }: { tone: Tone; value: string }) {
+  const color = toneColor(tone);
+  return (
+    <>
+      <span className="vj-dot" style={{ color }} aria-hidden />
+      <span className="text-[color:var(--vj-ink-dim)]">DMX</span>
+      <span
+        className="tabular-nums normal-case tracking-normal"
+        style={{ color }}
+      >
+        {value}
+      </span>
+    </>
   );
 }
 

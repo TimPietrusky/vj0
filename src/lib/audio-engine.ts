@@ -102,7 +102,12 @@ export class AudioEngine {
    */
   getTimeDomainData(target: Float32Array): void {
     if (!this.analyserNode) return;
-    this.analyserNode.getFloatTimeDomainData(target);
+    // Newer lib.dom narrows getFloatTimeDomainData to Float32Array<ArrayBuffer>
+    // (excluding SharedArrayBuffer-backed arrays). The buffer here is a
+    // plain ArrayBuffer at runtime — assert that to TS so the call type-checks.
+    this.analyserNode.getFloatTimeDomainData(
+      target as Float32Array<ArrayBuffer>
+    );
   }
 
   /**
@@ -124,6 +129,44 @@ export class AudioEngine {
    */
   getLatestFeatures(): AudioFeatures | null {
     return this.latestFeatures;
+  }
+
+  /**
+   * Build a fresh tap on the input audio for downstream consumers (e.g. the
+   * RecordingEngine feeding MediaRecorder).
+   *
+   * Adds a `MediaStreamAudioDestinationNode` as an extra sink on the existing
+   * `sourceNode` — this is a parallel branch, so the analyser/worklet paths
+   * are unaffected and the audio graph keeps its zero-allocation hot loop.
+   * Returns a handle with the live `MediaStream` and a `disconnect` function;
+   * calling `disconnect` removes only this branch and stops the stream tracks.
+   *
+   * Returns null if the engine isn't initialised. Multiple taps are allowed
+   * (each is independent), but the typical case is one tap per recording.
+   *
+   * The destination node is owned by the AudioContext, so it is also torn
+   * down automatically when `destroy()` closes the context — callers don't
+   * have to disconnect on engine teardown, but they SHOULD when they're
+   * just stopping their own work, to avoid accumulating sinks across repeated
+   * start/stop cycles.
+   */
+  createAudioTap(): { stream: MediaStream; disconnect: () => void } | null {
+    if (!this.audioContext || !this.sourceNode) return null;
+    const destination = this.audioContext.createMediaStreamDestination();
+    const source = this.sourceNode;
+    source.connect(destination);
+    return {
+      stream: destination.stream,
+      disconnect: () => {
+        try {
+          source.disconnect(destination);
+        } catch {
+          // Either we're already disconnected or the context closed under us.
+          // Both are fine — the destination becomes unreachable either way.
+        }
+        destination.stream.getTracks().forEach((t) => t.stop());
+      },
+    };
   }
 
   /**

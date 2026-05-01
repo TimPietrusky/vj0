@@ -193,8 +193,10 @@ export class DmxOutput {
     if (!this.device || !this.connected) return;
 
     try {
-      // Send data on Endpoint #4
-      await this.device.transferOut(4, universe);
+      // Send data on Endpoint #4. Cast: newer lib.dom narrows transferOut's
+      // BufferSource to ArrayBufferView<ArrayBuffer>; our universe buffer
+      // is plain ArrayBuffer-backed at runtime.
+      await this.device.transferOut(4, universe as Uint8Array<ArrayBuffer>);
     } catch {
       // Connection may have been lost
       this.connected = false;

@@ -315,7 +315,14 @@ export class WebRtcAiTransport implements AiTransport {
   sendBinary(data: ArrayBuffer | ArrayBufferView): void {
     const ch = this.channel;
     if (!ch || ch.readyState !== "open") return;
-    ch.send(data);
+    // Newer lib.dom types narrow RTCDataChannel.send to ArrayBufferView<ArrayBuffer>
+    // (i.e. typed arrays NOT backed by a SharedArrayBuffer). Narrow by branch
+    // so each call site picks the matching overload — runtime accepts either.
+    if (data instanceof ArrayBuffer) {
+      ch.send(data);
+    } else {
+      ch.send(data as ArrayBufferView<ArrayBuffer>);
+    }
   }
 
   /** Get current send buffer size in bytes (for backpressure) */

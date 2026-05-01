@@ -9,8 +9,12 @@ interface PromptDockProps {
 }
 
 /**
- * Prompt input with draft/live indicator, send button, and 1-9 preset chips.
- * Enter commits the draft. Escape reverts. Click a chip fires that preset.
+ * Prompt input + send. Stripped to a single row: placeholder doubles as the
+ * "Prompt" label, the live/dirty state lives as a tiny status pill on the
+ * right of the input itself instead of a separate caption row above. Saves
+ * a whole line of vertical space and the input still reads as the prompt
+ * field — context (preview canvas right above) makes the missing label
+ * unambiguous. Enter commits the draft, Escape reverts.
  */
 export function PromptDock({ activePrompt, onSetPrompt }: PromptDockProps) {
   const [draft, setDraft] = useState(activePrompt);
@@ -20,20 +24,8 @@ export function PromptDock({ activePrompt, onSetPrompt }: PromptDockProps) {
   const dirty = draft !== activePrompt;
 
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="vj-panel-title">Prompt</div>
-        <span
-          className={`text-[10px] font-mono tabular-nums ${
-            dirty
-              ? "text-[color:var(--vj-warn)]"
-              : "text-[color:var(--vj-live)]"
-          }`}
-        >
-          {dirty ? "● unsaved — ↵ to send" : "✓ live"}
-        </span>
-      </div>
-      <div className="flex items-stretch gap-2">
+    <div className="flex items-stretch gap-1.5">
+      <div className="relative flex-1">
         <input
           type="text"
           value={draft}
@@ -47,19 +39,38 @@ export function PromptDock({ activePrompt, onSetPrompt }: PromptDockProps) {
               setDraft(activePrompt);
             }
           }}
-          placeholder="describe the visual — press Enter to send"
-          className="vj-input flex-1 font-mono text-xs py-2"
+          placeholder="prompt — describe the visual"
+          className="vj-input w-full font-mono text-xs py-2"
+          // Inline to win over the .vj-input shorthand `padding: 0.375rem
+          // 0.625rem` which (same specificity, defined after Tailwind in
+          // source order) eats the `pr-*` utility. Reserves room for the
+          // ✓ live / ● ↵ pill so the prompt text never scrolls under it.
+          style={{ paddingRight: "3.25rem" }}
         />
-        <button
-          type="button"
-          onClick={() => onSetPrompt(draft)}
-          disabled={!dirty}
-          className="vj-btn vj-btn--accent"
-          title="Enter"
+        {/* Inline live/dirty pill — sits inside the input on the right so
+            it doesn't claim its own row. Switches color on dirty (warn
+            yellow) vs synced (live emerald) so a glance tells you whether
+            the projector is showing what's typed. */}
+        <span
+          className={`pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] font-mono uppercase tracking-wider tabular-nums ${
+            dirty
+              ? "text-[color:var(--vj-warn)]"
+              : "text-[color:var(--vj-live)]"
+          }`}
+          aria-live="polite"
         >
-          Send ↵
-        </button>
+          {dirty ? "● ↵" : "✓ live"}
+        </span>
       </div>
+      <button
+        type="button"
+        onClick={() => onSetPrompt(draft)}
+        disabled={!dirty}
+        className="vj-btn vj-btn--accent"
+        title="Send prompt (Enter)"
+      >
+        send ↵
+      </button>
     </div>
   );
 }
