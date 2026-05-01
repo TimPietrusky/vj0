@@ -33,14 +33,27 @@ const FRAG_SRC = `#version 300 es
 precision highp float;
 
 uniform sampler2D u_tex;
-uniform vec2 u_texel;     // 1.0 / source-texture size, in UV units
-uniform float u_sharpen;  // 0 = bypass, ~0.5 mild, ~1.5 aggressive
+uniform vec2 u_texel;       // 1.0 / source-texture size, in UV units
+uniform float u_sharpen;    // 0 = bypass, ~0.5 mild, ~1.5 aggressive
+uniform float u_pixelate;   // 0 = bypass, N>=1 = block size in source pixels
 
 in vec2 v_uv;
 out vec4 o;
 
 void main() {
-  vec3 c = texture(u_tex, v_uv).rgb;
+  // Pixelate pre-pass: snap UV to a grid in source-pixel space so each NxN
+  // block samples a single source pixel, then everything downstream sees that
+  // chunky-pixel image. Sharpen is forced off when pixelate is on — sharpening
+  // pixelated content amplifies the block-edge step, which looks bad.
+  vec2 uv = v_uv;
+  if (u_pixelate >= 1.0) {
+    vec2 blockUv = u_texel * u_pixelate;
+    uv = (floor(v_uv / blockUv) + 0.5) * blockUv;
+    o = vec4(texture(u_tex, uv).rgb, 1.0);
+    return;
+  }
+
+  vec3 c = texture(u_tex, uv).rgb;
   if (u_sharpen <= 0.001) {
     o = vec4(c, 1.0);
     return;
@@ -48,10 +61,10 @@ void main() {
   // 4-tap cross unsharp mask: sample N/S/E/W in source-pixel units, average
   // them, subtract from the centre and add the difference back scaled by the
   // sharpen amount. Cheap (5 texture reads), no ringing artifacts.
-  vec3 n = texture(u_tex, v_uv + vec2(0.0, -u_texel.y)).rgb;
-  vec3 s = texture(u_tex, v_uv + vec2(0.0,  u_texel.y)).rgb;
-  vec3 e = texture(u_tex, v_uv + vec2(u_texel.x, 0.0)).rgb;
-  vec3 w = texture(u_tex, v_uv + vec2(-u_texel.x, 0.0)).rgb;
+  vec3 n = texture(u_tex, uv + vec2(0.0, -u_texel.y)).rgb;
+  vec3 s = texture(u_tex, uv + vec2(0.0,  u_texel.y)).rgb;
+  vec3 e = texture(u_tex, uv + vec2(u_texel.x, 0.0)).rgb;
+  vec3 w = texture(u_tex, uv + vec2(-u_texel.x, 0.0)).rgb;
   vec3 blur = (n + s + e + w) * 0.25;
   vec3 sharp = c + (c - blur) * u_sharpen;
   o = vec4(clamp(sharp, 0.0, 1.0), 1.0);
@@ -65,6 +78,9 @@ export interface StageRendererHandle {
 
 interface StageRendererProps {
   sharpen: number;
+  /** Pixelate block size in source pixels. 0 = bypass, 1 = unchanged,
+   *  N>1 = each NxN source-pixel block becomes a single solid colour. */
+  pixelate?: number;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -72,18 +88,24 @@ interface StageRendererProps {
 export const StageRenderer = forwardRef<
   StageRendererHandle,
   StageRendererProps
->(function StageRenderer({ sharpen, className, style }, ref) {
+>(function StageRenderer({ sharpen, pixelate, className, style }, ref) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   const programRef = useRef<WebGLProgram | null>(null);
   const texRef = useRef<WebGLTexture | null>(null);
   const uTexelRef = useRef<WebGLUniformLocation | null>(null);
   const uSharpenRef = useRef<WebGLUniformLocation | null>(null);
+  const uPixelateRef = useRef<WebGLUniformLocation | null>(null);
   const sharpenRef = useRef(sharpen);
+  const pixelateRef = useRef(pixelate ?? 0);
 
   useEffect(() => {
     sharpenRef.current = sharpen;
   }, [sharpen]);
+
+  useEffect(() => {
+    pixelateRef.current = pixelate ?? 0;
+  }, [pixelate]);
 
   // One-shot WebGL setup. Compiles the program, allocates the texture, sets
   // up the full-screen quad. We render in `drawBitmap`, not on a RAF loop —
@@ -148,6 +170,7 @@ export const StageRenderer = forwardRef<
 
     uTexelRef.current = gl.getUniformLocation(prog, "u_texel");
     uSharpenRef.current = gl.getUniformLocation(prog, "u_sharpen");
+    uPixelateRef.current = gl.getUniformLocation(prog, "u_pixelate");
 
     return () => {
       gl.deleteProgram(prog);
@@ -190,6 +213,9 @@ export const StageRenderer = forwardRef<
       }
       if (uSharpenRef.current) {
         gl.uniform1f(uSharpenRef.current, sharpenRef.current);
+      }
+      if (uPixelateRef.current) {
+        gl.uniform1f(uPixelateRef.current, pixelateRef.current);
       }
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     },

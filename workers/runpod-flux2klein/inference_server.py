@@ -50,6 +50,7 @@ import base64
 import io
 import json
 import math
+import os
 import queue
 import sys
 import threading
@@ -204,15 +205,29 @@ def generate(pipe, image_latents, prompt_embeds, alpha, n_steps, height, width, 
 
 
 def warmup(pipe, prompt_cache, width, height, alpha, n_steps):
+    """Re-warm at a new (width, height). First iter JIT-compiles for the new
+    shape — costs ~120-160s with fp8 on Blackwell. Subsequent iters are normal.
+    Emits status messages on stdout so the frontend can show a progress overlay."""
     log(f"warmup at {width}×{height}, n_steps={n_steps} ({WARMUP_ITERS} iters; first one triggers compile)")
+    # Tell the client we're going dark for ~150s.
+    emit(status="compiling", width=width, height=height, n_steps=n_steps,
+         total_iters=WARMUP_ITERS, est_seconds=150)
     embeds = prompt_cache.get(DEFAULT_PROMPT)
     fake_img = Image.new("RGB", (width, height), (32, 32, 32))
     lat = encode_image_to_latents(pipe, fake_img, width, height)
+    t_warmup_start = time.perf_counter()
     for i in range(WARMUP_ITERS):
         t0 = time.perf_counter()
         _ = generate(pipe, lat, embeds, alpha, n_steps, height, width, DEFAULT_SEED)
         torch.cuda.synchronize()
-        log(f"warmup {i+1}/{WARMUP_ITERS}: {(time.perf_counter()-t0)*1000:.0f}ms")
+        iter_ms = (time.perf_counter() - t0) * 1000
+        log(f"warmup {i+1}/{WARMUP_ITERS}: {iter_ms:.0f}ms")
+        emit(status="compiling_progress", width=width, height=height,
+             iter=i + 1, total_iters=WARMUP_ITERS,
+             elapsed_ms=round((time.perf_counter() - t_warmup_start) * 1000),
+             iter_ms=round(iter_ms))
+    emit(status="warmed", width=width, height=height,
+         total_ms=round((time.perf_counter() - t_warmup_start) * 1000))
 
 
 def pil_to_jpeg_bytes(img: Image.Image, quality=JPEG_QUALITY) -> bytes:
@@ -255,9 +270,31 @@ def main():
         "capture_height": DEFAULT_HEIGHT,
     }
 
-    # warmup at default size so first real frame is fast
-    warmup(pipe, prompt_cache, state["width"], state["height"],
-           state["alpha"], state["n_steps"])
+    # Warmup all shapes from WARMUP_SHAPES env (comma-separated WxH list, e.g.
+    # "256x256,512x288,512x512"). Default = just the current state. Each shape
+    # adds ~150s but only once at startup; once warmed, switching to that shape
+    # at runtime is a torch.compile cache hit and re-warms in <1s.
+    shapes_env = os.environ.get("WARMUP_SHAPES", "")
+    shapes = []
+    for s in shapes_env.split(","):
+        s = s.strip()
+        if not s: continue
+        try:
+            w, h = s.lower().split("x")
+            shapes.append((int(w), int(h)))
+        except ValueError:
+            log(f"WARMUP_SHAPES: skipping invalid token '{s}'")
+    if not shapes:
+        shapes = [(state["width"], state["height"])]
+    log(f"warming up shapes: {shapes}")
+    last_warmed = None
+    for w, h in shapes:
+        warmup(pipe, prompt_cache, w, h, state["alpha"], state["n_steps"])
+        last_warmed = (w, h)
+    # Position state at the LAST warmed shape so first user request at that
+    # shape doesn't trigger another warmup.
+    if last_warmed is not None:
+        state["width"], state["height"] = last_warmed
 
     emit(status="ready", width=state["width"], height=state["height"])
 

@@ -45,6 +45,7 @@ export const OUTPUT_PRESETS: OutputPreset[] = [
   { id: "384x384", w: 384, h: 384, label: "384×384 · 1:1 · balanced" },
   { id: "448x256", w: 448, h: 256, label: "448×256 · ~16:9 · balanced (projector)" },
   { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · max (projector)" },
+  { id: "288x512", w: 288, h: 512, label: "288×512 · 9:16 · vertical (phone/portrait)" },
   { id: "512x512", w: 512, h: 512, label: "512×512 · 1:1 · max" },
 ];
 
@@ -103,6 +104,12 @@ interface AiSettingsState {
   stageSharpen: number;
   stageScanlines: boolean;
   stageVignette: boolean;
+  // Pixelate FX. `stagePixelate` toggles the effect; `stagePixelateSize`
+  // is the block size in source pixels (1 = unchanged, 8 = chunky 8×8 blocks).
+  // Applies to BOTH the AI panel preview and the /vj/stage full-screen
+  // output, so what you see in monitor matches what hits the projector.
+  stagePixelate: boolean;
+  stagePixelateSize: number;
   // Manual fog intensity (0..255) used when the fog toggle is ON. The
   // ON/OFF state itself is not persisted — reloads always start with fog
   // off, which is the safer physical default for a 800 W heater.
@@ -131,6 +138,8 @@ interface AiSettingsState {
   setStageSharpen: (value: number) => void;
   setStageScanlines: (value: boolean) => void;
   setStageVignette: (value: boolean) => void;
+  setStagePixelate: (value: boolean) => void;
+  setStagePixelateSize: (value: number) => void;
   setFogIntensity: (value: number) => void;
 }
 
@@ -145,7 +154,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       captureSize: 256,
       outputWidth: 512,
       outputHeight: 288, // 16:9 default — projector-friendly
-      frameRate: 20,
+      frameRate: 30,
       seed: 42,
       kleinAlpha: 0.10,
       kleinSteps: 2,
@@ -160,6 +169,8 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       stageSharpen: 0.6,
       stageScanlines: true,
       stageVignette: true,
+      stagePixelate: false,
+      stagePixelateSize: 8,
       fogIntensity: 255,
 
       setAudioDeviceId: (value) => set({ audioDeviceId: value }),
@@ -171,6 +182,10 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         set({ stageSharpen: Math.max(0, Math.min(10, value)) }),
       setStageScanlines: (value) => set({ stageScanlines: value }),
       setStageVignette: (value) => set({ stageVignette: value }),
+      setStagePixelate: (value) => set({ stagePixelate: value }),
+      setStagePixelateSize: (value) =>
+        // 1 = no effect (single-pixel blocks); 64 = extreme chonky pixels
+        set({ stagePixelateSize: Math.max(1, Math.min(64, Math.round(value))) }),
       setFogIntensity: (value) =>
         set({ fogIntensity: Math.max(0, Math.min(255, Math.round(value))) }),
       setBackend: (value) => set({ backend: value }),
@@ -212,16 +227,17 @@ export const useAiSettingsStore = create<AiSettingsState>()(
         set({ outputWidth: snap(width), outputHeight: snap(h) });
       },
       setFrameRate: (value) =>
-        set({ frameRate: [10, 20, 30, 60].includes(value) ? value : 20 }),
+        set({ frameRate: [10, 20, 30, 60].includes(value) ? value : 30 }),
       setSeed: (value) => set({ seed: Math.max(0, Math.floor(value)) }),
     }),
     {
       name: "vj0-ai-settings-storage",
-      version: 3,
+      version: 4,
       migrate: (persisted: unknown, version: number) => {
         // v0/v1 had: outputSize: number, promptPresets: string[]
         // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
         // v3:       max output capped at 512×512 (768/1024 sizes removed for live perf)
+        // v4:       default frameRate bumped 20 → 30 (dual-GPU server saturates ~28 fps)
         const s = (persisted as Record<string, unknown>) || {};
         const out: Record<string, unknown> = { ...s };
 
@@ -247,6 +263,14 @@ export const useAiSettingsStore = create<AiSettingsState>()(
             out.outputWidth = 512;
             out.outputHeight = 288;
           }
+        }
+
+        if (version < 4) {
+          // Bump legacy default 20 fps → 30 fps. Dual-GPU multi-worker server
+          // can saturate ~28 fps at 512×288 / 4-step, so 30 is the new sweet spot.
+          // Leave 10 alone (some users intentionally pick low for laptop-power
+          // setups), and leave 60 alone (already smooth-by-choice).
+          if (out.frameRate === 20) out.frameRate = 30;
         }
 
         return out as unknown as AiSettingsState;

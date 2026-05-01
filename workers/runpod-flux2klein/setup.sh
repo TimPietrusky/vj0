@@ -18,6 +18,16 @@ HF_CACHE_DIR=${HF_HOME:-/workspace/hf-cache}
 export HF_HOME=$HF_CACHE_DIR
 mkdir -p "$HF_CACHE_DIR"
 
+# torch.compile / Inductor disk cache on the network volume.
+# Without this, every pod restart pays ~150s per (height, width) shape on the
+# first warmup iter — Inductor's default cache is /tmp/torchinductor_root,
+# which is container-ephemeral. With this, subsequent boots hit ~20s cache hit
+# (kernel disk read + relink) instead of full Triton autotune + codegen.
+export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-/workspace/torch-inductor-cache}
+export TORCHINDUCTOR_FX_GRAPH_CACHE=${TORCHINDUCTOR_FX_GRAPH_CACHE:-1}
+export TORCHINDUCTOR_AUTOGRAD_CACHE=${TORCHINDUCTOR_AUTOGRAD_CACHE:-1}
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
+
 echo "[1/6] torch 2.11.0+cu128 (driver 570 hosts can't run cu130 — see BENCH-2026-04-30.md)"
 # --ignore-installed cryptography needed because the system cryptography has no RECORD file
 $PIP --ignore-installed cryptography \

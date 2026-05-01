@@ -29,6 +29,8 @@ export default function StagePage() {
   const sharpen = useAiSettingsStore((s) => s.stageSharpen);
   const scanlines = useAiSettingsStore((s) => s.stageScanlines);
   const vignette = useAiSettingsStore((s) => s.stageVignette);
+  const pixelate = useAiSettingsStore((s) => s.stagePixelate);
+  const pixelateSize = useAiSettingsStore((s) => s.stagePixelateSize);
 
   useEffect(() => {
     const ch = openStageChannel();
@@ -87,7 +89,8 @@ export default function StagePage() {
     >
       <StageRenderer
         ref={rendererRef}
-        sharpen={sharpen}
+        sharpen={pixelate ? 0 : sharpen}
+        pixelate={pixelate ? pixelateSize : 0}
         style={{
           position: "absolute",
           inset: 0,

@@ -191,6 +191,8 @@ export function VJApp() {
     stageSharpen: aiStageSharpen,
     stageScanlines: aiStageScanlines,
     stageVignette: aiStageVignette,
+    stagePixelate: aiStagePixelate,
+    stagePixelateSize: aiStagePixelateSize,
     fogIntensity,
     setBackend: setAiBackend,
     setSendFrames: setAiSendFrames,
@@ -208,6 +210,8 @@ export function VJApp() {
     setStageSharpen: setAiStageSharpen,
     setStageScanlines: setAiStageScanlines,
     setStageVignette: setAiStageVignette,
+    setStagePixelate: setAiStagePixelate,
+    setStagePixelateSize: setAiStagePixelateSize,
     setFogIntensity,
     updatePromptPreset,
   } = useAiSettingsStore();
@@ -295,6 +299,14 @@ export function VJApp() {
     firePreset(presets[idx].prompt);
   }, [firePreset]);
 
+  // Re-roll the seed without changing the prompt. Spacebar uses this for
+  // "give me a fresh variation of what's on screen" — keeps the user's chosen
+  // mood, just shakes the noise. Number keys still swap prompts via firePreset.
+  const rerollSeed = useCallback(() => {
+    setAiSeed(Math.floor(Math.random() * 1_000_000));
+    flushSettingsNow();
+  }, [setAiSeed, flushSettingsNow]);
+
   // Klein α nudge — clamped 0..0.5, snapped to 2 decimals so the chip+slider
   // display the value cleanly. Used by both keyboard arrows and the on-screen
   // HotkeyBoard arrow caps. We pull the latest value from the store instead
@@ -367,10 +379,12 @@ export function VJApp() {
       }
 
       if (e.key === " ") {
-        // Roulette: pick a random preset and fire it (also re-rolls the seed).
-        // Stopping/starting generation is rarely needed mid-set; surfacing a
-        // surprise prompt on Space is far more useful for live work.
-        fireRandomPreset();
+        // Re-roll the seed only — keep the current prompt. Gives the user a
+        // fresh noise variation of the same intent. Number keys 1-9 still
+        // change prompts. (Used to fire a random preset; was disorienting in
+        // live sets where you've just dialed in a vibe and don't want it
+        // replaced wholesale.)
+        rerollSeed();
         e.preventDefault();
         return;
       }
@@ -411,12 +425,27 @@ export function VJApp() {
     adjustAlpha,
     triggerFog,
     setAiHideUi,
+    rerollSeed,
   ]);
 
   const [aiStatus, setAiStatus] = useState<AiTransportStatus>("idle");
   const [aiLogs, setAiLogs] = useState<string[]>([]);
   const [aiImageUrl, setAiImageUrl] = useState<string | null>(null);
   const [aiGenTime, setAiGenTime] = useState<number | null>(null);
+  // Server-reported compile status. When the worker has to JIT-compile a new
+  // (width, height) shape, every connected GPU is dark for ~150s. We surface
+  // that state so the UI can show "compiling 512x288… ~150s" instead of a
+  // mysteriously frozen output canvas.
+  const [aiCompile, setAiCompile] = useState<{
+    width: number;
+    height: number;
+    n_steps?: number;
+    iter?: number;
+    total_iters?: number;
+    elapsed_ms?: number;
+    est_seconds?: number;
+    started_at: number;
+  } | null>(null);
 
   // DMX/Lighting UI state
   const [dmxStatus, setDmxStatus] = useState<DmxStatus>("disconnected");
@@ -829,6 +858,34 @@ export function VJApp() {
           const data = JSON.parse(frame.message);
           if (data.type === "stats" && data.gen_time_ms) {
             setAiGenTime(data.gen_time_ms);
+            return;
+          }
+          if (data.type === "compile") {
+            // Server is JIT-compiling for a new (width, height). The output
+            // canvas will stay frozen until "warmed" arrives. ~150s per shape.
+            if (data.status === "compiling") {
+              setAiCompile({
+                width: data.width,
+                height: data.height,
+                n_steps: data.n_steps,
+                total_iters: data.total_iters,
+                est_seconds: data.est_seconds,
+                started_at: Date.now(),
+              });
+            } else if (data.status === "compiling_progress") {
+              setAiCompile((prev) =>
+                prev
+                  ? {
+                      ...prev,
+                      iter: data.iter,
+                      total_iters: data.total_iters,
+                      elapsed_ms: data.elapsed_ms,
+                    }
+                  : prev
+              );
+            } else if (data.status === "warmed") {
+              setAiCompile(null);
+            }
             return;
           }
         } catch {
@@ -1423,11 +1480,38 @@ export function VJApp() {
             >
               <StageRenderer
                 ref={previewRendererRef}
-                sharpen={aiStageSharpen}
+                sharpen={aiStagePixelate ? 0 : aiStageSharpen}
+                pixelate={aiStagePixelate ? aiStagePixelateSize : 0}
                 className="w-full h-full"
                 style={{ objectFit: "contain" }}
               />
-              {!aiImageUrl && (
+              {aiCompile && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4 bg-black/85 backdrop-blur-sm gap-3 font-mono">
+                  <div className="text-[11px] uppercase tracking-wider text-[color:var(--vj-info)] animate-pulse">
+                    compiling worker for new shape
+                  </div>
+                  <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
+                    {aiCompile.width}×{aiCompile.height}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+                    {(() => {
+                      const elapsed = Math.max(
+                        0,
+                        Math.round((Date.now() - aiCompile.started_at) / 1000)
+                      );
+                      const total = aiCompile.est_seconds || 150;
+                      const remaining = Math.max(0, total - elapsed);
+                      return `~${remaining}s remaining (one-time JIT cost; future shape changes are instant)`;
+                    })()}
+                  </div>
+                  {aiCompile.iter && aiCompile.total_iters && (
+                    <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+                      warmup {aiCompile.iter}/{aiCompile.total_iters}
+                    </div>
+                  )}
+                </div>
+              )}
+              {!aiImageUrl && !aiCompile && (
                 <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
                   {aiStatus === "connected" ? (
                     <span>
@@ -1769,6 +1853,40 @@ export function VJApp() {
                 />
                 vignette
               </label>
+            </div>
+            {/* Pixelate is mutually exclusive with sharpen (sharpen on
+                quantised blocks just amplifies block-edge step). When ON,
+                StageRenderer skips the sharpen pass entirely. */}
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-2 text-[10px] font-mono text-[color:var(--vj-ink-dim)] uppercase tracking-wider w-16">
+                <input
+                  type="checkbox"
+                  checked={aiStagePixelate}
+                  onChange={(e) => setAiStagePixelate(e.target.checked)}
+                  className="vj-check"
+                />
+                pixelate
+              </label>
+              <input
+                type="range"
+                min={2}
+                max={32}
+                step={1}
+                value={aiStagePixelateSize}
+                onChange={(e) => setAiStagePixelateSize(Number(e.target.value))}
+                disabled={!aiStagePixelate}
+                className="vj-range vj-range--tight"
+                style={
+                  {
+                    ["--vj-range-fill" as string]: `${((aiStagePixelateSize - 2) / 30) * 100}%`,
+                    opacity: aiStagePixelate ? 1 : 0.3,
+                  } as React.CSSProperties
+                }
+                title="Pixelate block size in source pixels (2..32)"
+              />
+              <span className="font-mono text-[11px] tabular-nums text-[color:var(--vj-info)] w-10 text-right ml-auto">
+                {aiStagePixelateSize}px
+              </span>
             </div>
           </div>
 

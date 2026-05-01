@@ -73,6 +73,14 @@ function getIceServers() {
 const workers = [];
 let roundRobinIdx = 0;
 
+// Latest known state, accumulated from broadcasts. Replayed to each worker
+// when it transitions to READY so workers that come up late don't end up
+// stuck at default state while their peers are at the user's actual config.
+// Without this, worker A and worker B can drift if the client sends a state
+// change between A.READY and B.READY — round-robin dispatch then alternates
+// good/bad frames.
+const latestState = {};
+
 function spawnWorker(gpu) {
   console.log(`[worker ${gpu}] spawning (CUDA_VISIBLE_DEVICES=${gpu})`);
   const env = { ...process.env, CUDA_VISIBLE_DEVICES: String(gpu), WORKER_ID: String(gpu) };
@@ -122,9 +130,48 @@ function handleWorkerLine(w, line) {
   if (msg.status === "ready") {
     console.log(`[worker ${w.gpu}] READY`);
     w.ready = true;
+    // Replay the latest known state into this worker. Without this, a worker
+    // that came up after its peer received a state change is stuck at default
+    // settings (e.g. 256x256) while peers are at the user's actual config
+    // (e.g. 288x512), and round-robin dispatch alternates good/bad frames.
+    if (Object.keys(latestState).length > 0) {
+      try {
+        w.proc.stdin.write(JSON.stringify(latestState) + "\n");
+        console.log(`[worker ${w.gpu}] replayed latest state: ${Object.keys(latestState).join(",")}`);
+      } catch (e) {
+        console.error(`[worker ${w.gpu}] state replay failed:`, e.message);
+      }
+    }
     flushPendingForWorker(w);
     return;
   }
+  // Compile status messages — forward to WebRTC client so the UI can show
+  // a "compiling 512x288..." overlay during the ~150s JIT cost on shape change.
+  if (msg.status === "compiling" || msg.status === "compiling_progress" || msg.status === "warmed") {
+    if (msg.status === "compiling") {
+      console.log(`[worker ${w.gpu}] compiling ${msg.width}x${msg.height} (~${msg.est_seconds}s)`);
+    } else if (msg.status === "warmed") {
+      console.log(`[worker ${w.gpu}] warmed ${msg.width}x${msg.height} in ${msg.total_ms}ms`);
+    }
+    if (activeChannel?.readyState === "open") {
+      activeChannel.send(JSON.stringify({
+        type: "compile",
+        status: msg.status,
+        width: msg.width,
+        height: msg.height,
+        n_steps: msg.n_steps,
+        iter: msg.iter,
+        total_iters: msg.total_iters,
+        elapsed_ms: msg.elapsed_ms,
+        iter_ms: msg.iter_ms,
+        total_ms: msg.total_ms,
+        est_seconds: msg.est_seconds,
+        worker: w.gpu,
+      }));
+    }
+    return;
+  }
+
   if (msg.status === "frame") {
     w.framePending = Math.max(0, w.framePending - 1);
     w.framesProduced = (w.framesProduced || 0) + 1;
@@ -193,6 +240,9 @@ function nextReadyWorker() {
 
 function broadcastState(stateOnly) {
   if (Object.keys(stateOnly).length === 0) return;
+  // Remember every state field we've ever seen so a worker that comes up
+  // late can be brought up to spec on its READY event (see handleWorkerLine).
+  Object.assign(latestState, stateOnly);
   const line = JSON.stringify(stateOnly) + "\n";
   for (const w of workers) {
     if (w.ready) {
