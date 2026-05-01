@@ -51,7 +51,11 @@ export function ResPicker({ width, height, onPick }: ResPickerProps) {
         <div className="grid grid-cols-3 gap-1.5">
           {OUTPUT_PRESETS.map((p) => {
             const active = current?.id === p.id;
-            const ratio = p.w === p.h ? "1:1" : "~16:9";
+            // After the v5 preset curation every non-square preset is either
+            // exact 16:9 (horizontal) or exact 9:16 (vertical). Pick by
+            // orientation; no need for the "~" approximation tilde anymore.
+            const ratio =
+              p.w === p.h ? "1:1" : p.w > p.h ? "16:9" : "9:16";
             return (
               <button
                 key={p.id}
