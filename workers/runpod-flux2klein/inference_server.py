@@ -97,6 +97,14 @@ def _fp8_filter(module, fqn):
     return not any(b in fqn.lower() for b in bad)
 
 
+def emit_phase(stage, **extra):
+    """Stage notification for the WebRTC client overlay. Server.js forwards
+    these as JSON over the data channel so the user sees what's happening
+    during the ~3 min boot (load weights, fp8, compile stubs, warmup) instead
+    of staring at a frozen 'connected' canvas."""
+    emit(status="phase", stage=stage, **extra)
+
+
 def setup_pipeline():
     log(f"torch={torch.__version__} cuda={torch.version.cuda} "
         f"device={torch.cuda.get_device_name(0)} cap={torch.cuda.get_device_capability(0)}")
@@ -107,6 +115,7 @@ def setup_pipeline():
 
     from diffusers import Flux2KleinKVPipeline, AutoencoderKLFlux2
 
+    emit_phase("loading_weights", repo=KLEIN_REPO, est_seconds=140)
     log(f"loading {KLEIN_REPO}...")
     t0 = time.perf_counter()
     pipe = Flux2KleinKVPipeline.from_pretrained(KLEIN_REPO, torch_dtype=torch.bfloat16)
@@ -115,11 +124,14 @@ def setup_pipeline():
     pipe.set_progress_bar_config(disable=True)
     log(f"loaded in {time.perf_counter()-t0:.1f}s, "
         f"vram={torch.cuda.memory_allocated()/1e9:.2f}GB")
+    emit_phase("loaded", elapsed_ms=round((time.perf_counter()-t0)*1000),
+               vram_gb=round(torch.cuda.memory_allocated()/1e9, 2))
 
     if USE_FP8:
         # MUST be applied BEFORE torch.compile so the compiler captures the
         # fp8 ops in its kernel graph. See BENCH-2026-04-30.md Phase 3 for the
         # 24-30% latency win this delivers on Blackwell sm_120.
+        emit_phase("applying_fp8", est_seconds=1)
         log("applying TorchAO Float8DynamicActivationFloat8WeightConfig (PerRow) on transformer...")
         try:
             from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
@@ -136,6 +148,7 @@ def setup_pipeline():
             log(f"WARNING: fp8 quantization failed ({type(e).__name__}: {e}); "
                 f"continuing in bf16. Set USE_FP8=False to skip this attempt.")
 
+    emit_phase("registering_compile_stubs", est_seconds=1)
     log("compiling transformer + vae.encoder + vae.decoder (mode=default)...")
     t1 = time.perf_counter()
     pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=False, dynamic=False)

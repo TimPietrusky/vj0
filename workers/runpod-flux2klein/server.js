@@ -57,6 +57,11 @@ const STATE_FIELDS = ["prompt", "seed", "alpha", "n_steps", "width", "height",
 const MAX_OUTBOUND_BUFFER = Number(process.env.MAX_OUTBOUND_BUFFER || 1024 * 1024);
 let droppedOutbound = 0;
 
+// Latest known compile status per worker. Used to replay state to a client
+// that connects mid-compile (so the overlay shows up immediately instead of
+// staring at a frozen "connected" canvas with no idea why nothing is happening).
+const latestCompileByWorker = new Map();
+
 function getIceServers() {
   const raw = process.env.ICE_SERVERS_JSON;
   if (!raw) return [{ urls: "stun:stun.l.google.com:19302" }];
@@ -147,27 +152,36 @@ function handleWorkerLine(w, line) {
   }
   // Compile status messages — forward to WebRTC client so the UI can show
   // a "compiling 512x288..." overlay during the ~150s JIT cost on shape change.
+  // Also remember the latest status per worker so a client that connects
+  // mid-compile gets the overlay immediately (replayed in pc.ondatachannel).
   if (msg.status === "compiling" || msg.status === "compiling_progress" || msg.status === "warmed") {
     if (msg.status === "compiling") {
       console.log(`[worker ${w.gpu}] compiling ${msg.width}x${msg.height} (~${msg.est_seconds}s)`);
     } else if (msg.status === "warmed") {
       console.log(`[worker ${w.gpu}] warmed ${msg.width}x${msg.height} in ${msg.total_ms}ms`);
     }
+    const payload = {
+      type: "compile",
+      status: msg.status,
+      width: msg.width,
+      height: msg.height,
+      n_steps: msg.n_steps,
+      iter: msg.iter,
+      total_iters: msg.total_iters,
+      elapsed_ms: msg.elapsed_ms,
+      iter_ms: msg.iter_ms,
+      total_ms: msg.total_ms,
+      est_seconds: msg.est_seconds,
+      worker: w.gpu,
+    };
+    if (msg.status === "warmed") {
+      // Worker is ready at this shape — clear the "currently compiling" memo.
+      latestCompileByWorker.delete(w.gpu);
+    } else {
+      latestCompileByWorker.set(w.gpu, payload);
+    }
     if (activeChannel?.readyState === "open") {
-      activeChannel.send(JSON.stringify({
-        type: "compile",
-        status: msg.status,
-        width: msg.width,
-        height: msg.height,
-        n_steps: msg.n_steps,
-        iter: msg.iter,
-        total_iters: msg.total_iters,
-        elapsed_ms: msg.elapsed_ms,
-        iter_ms: msg.iter_ms,
-        total_ms: msg.total_ms,
-        est_seconds: msg.est_seconds,
-        worker: w.gpu,
-      }));
+      activeChannel.send(JSON.stringify(payload));
     }
     return;
   }

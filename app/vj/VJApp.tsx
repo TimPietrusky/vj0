@@ -75,6 +75,71 @@ const SYSTEM_AUDIO_VALUE = "__system__";
  *
  * Engine lifecycle via refs (not React state) to avoid blocking render loops.
  */
+
+/**
+ * Overlay shown when the AI worker is JIT-compiling for a new (width, height).
+ * The compile is a single ~150 s torch.compile call that emits no Python-side
+ * progress, so we estimate elapsed/remaining locally from `startedAt` and the
+ * server-reported `estSeconds`. A 4 Hz timer keeps the bar moving even when
+ * nothing has happened on the network for tens of seconds.
+ */
+function CompileOverlay({
+  width,
+  height,
+  startedAt,
+  estSeconds,
+  iter,
+  totalIters,
+}: {
+  width: number;
+  height: number;
+  startedAt: number;
+  estSeconds: number;
+  iter?: number;
+  totalIters?: number;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const elapsed = Math.max(0, (now - startedAt) / 1000);
+  // Cap at 99% so the bar doesn't sit at 100% for ages if the cold compile
+  // outruns our estimate (the actual estSeconds is server-reported and tends
+  // to be conservative, ~150 s, while real cold compile can hit ~165 s).
+  const pct = Math.min(0.99, elapsed / estSeconds);
+  const remaining = Math.max(0, Math.ceil(estSeconds - elapsed));
+
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4 bg-black/85 backdrop-blur-sm gap-3 font-mono">
+      <div className="text-[11px] uppercase tracking-wider text-[color:var(--vj-info)] animate-pulse">
+        compiling worker for new shape
+      </div>
+      <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
+        {width}×{height}
+      </div>
+      <div className="w-56 h-1.5 bg-white/10 rounded-full overflow-hidden">
+        <div
+          className="h-full bg-[color:var(--vj-accent)] transition-[width] duration-200 ease-linear"
+          style={{ width: `${pct * 100}%` }}
+        />
+      </div>
+      <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] tabular-nums">
+        ~{remaining}s remaining · {Math.round(elapsed)}s elapsed
+      </div>
+      {iter && totalIters && (
+        <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+          warmup {iter}/{totalIters}
+        </div>
+      )}
+      <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] mt-2 max-w-xs">
+        one-time JIT cost · this shape will be instant on the next change
+      </div>
+    </div>
+  );
+}
+
 export function VJApp() {
   // Engine refs - NOT React state to avoid render loop interference
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -120,6 +185,21 @@ export function VJApp() {
       }),
     [aiSignalingUrl, aiIceServers, aiIceTransportPolicy]
   );
+
+  // /healthz URL — same origin as the signaling URL with /healthz path. We
+  // poll this when not actively receiving frames so we can show
+  // "preparing workers (N/M ready)" instead of "press generate" while the
+  // server is still loading weights or JIT-compiling.
+  const aiHealthUrl = useMemo(() => {
+    try {
+      const u = new URL(aiSignalingUrl, window.location.href);
+      u.pathname = "/healthz";
+      u.search = "";
+      return u.toString();
+    } catch {
+      return null;
+    }
+  }, [aiSignalingUrl]);
 
   useEffect(() => {
     return () => {
@@ -445,6 +525,14 @@ export function VJApp() {
     elapsed_ms?: number;
     est_seconds?: number;
     started_at: number;
+  } | null>(null);
+  // Polled /healthz state — shows worker-readiness so the UI knows whether
+  // the server is mid-bootup (still loading weights / compiling) vs ready.
+  // Without this we couldn't distinguish "user hasn't pressed generate" from
+  // "server is still spinning up the workers and frames physically can't flow yet".
+  const [aiServer, setAiServer] = useState<{
+    workerCount: number;
+    readyCount: number;
   } | null>(null);
 
   // DMX/Lighting UI state
@@ -863,26 +951,26 @@ export function VJApp() {
           if (data.type === "compile") {
             // Server is JIT-compiling for a new (width, height). The output
             // canvas will stay frozen until "warmed" arrives. ~150s per shape.
-            if (data.status === "compiling") {
-              setAiCompile({
+            // We accept progress events even if we missed the initial
+            // "compiling" emit — common case: client connects mid-warmup, after
+            // the server has already spoken "compiling" to a previous (or no)
+            // active channel. Without this, the overlay never appears.
+            if (data.status === "compiling" || data.status === "compiling_progress") {
+              setAiCompile((prev) => ({
                 width: data.width,
                 height: data.height,
                 n_steps: data.n_steps,
+                iter: data.iter,
                 total_iters: data.total_iters,
+                elapsed_ms: data.elapsed_ms,
                 est_seconds: data.est_seconds,
-                started_at: Date.now(),
-              });
-            } else if (data.status === "compiling_progress") {
-              setAiCompile((prev) =>
-                prev
-                  ? {
-                      ...prev,
-                      iter: data.iter,
-                      total_iters: data.total_iters,
-                      elapsed_ms: data.elapsed_ms,
-                    }
-                  : prev
-              );
+                // If we're seeing a progress event without a prior compiling
+                // event, back-calculate started_at from the server-reported
+                // elapsed_ms so the countdown stays accurate.
+                started_at:
+                  prev?.started_at ??
+                  Date.now() - (typeof data.elapsed_ms === "number" ? data.elapsed_ms : 0),
+              }));
             } else if (data.status === "warmed") {
               setAiCompile(null);
             }
@@ -952,6 +1040,45 @@ export function VJApp() {
       if (aiImageUrl) URL.revokeObjectURL(aiImageUrl);
     };
   }, [aiImageUrl]);
+
+  // Poll /healthz so we know whether the server's workers are ready. Without
+  // this, the UI can't distinguish "user hasn't pressed generate" from
+  // "workers are still booting". We poll every 2 s while connected (or
+  // attempting to be) and stop when the server is fully ready *and* we've
+  // received our first frame — at that point health-state is irrelevant.
+  useEffect(() => {
+    if (!aiHealthUrl) return;
+    if (aiStatus !== "connected" && aiStatus !== "connecting") {
+      setAiServer(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch(aiHealthUrl, { cache: "no-store" });
+        if (!r.ok) throw new Error(String(r.status));
+        const j = (await r.json()) as {
+          workerCount?: number;
+          readyCount?: number;
+        };
+        if (cancelled) return;
+        if (
+          typeof j.workerCount === "number" &&
+          typeof j.readyCount === "number"
+        ) {
+          setAiServer({ workerCount: j.workerCount, readyCount: j.readyCount });
+        }
+      } catch {
+        if (!cancelled) setAiServer(null);
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [aiHealthUrl, aiStatus]);
 
   const aiDebugCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -1486,41 +1613,45 @@ export function VJApp() {
                 style={{ objectFit: "contain" }}
               />
               {aiCompile && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4 bg-black/85 backdrop-blur-sm gap-3 font-mono">
-                  <div className="text-[11px] uppercase tracking-wider text-[color:var(--vj-info)] animate-pulse">
-                    compiling worker for new shape
-                  </div>
-                  <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
-                    {aiCompile.width}×{aiCompile.height}
-                  </div>
-                  <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-                    {(() => {
-                      const elapsed = Math.max(
-                        0,
-                        Math.round((Date.now() - aiCompile.started_at) / 1000)
-                      );
-                      const total = aiCompile.est_seconds || 150;
-                      const remaining = Math.max(0, total - elapsed);
-                      return `~${remaining}s remaining (one-time JIT cost; future shape changes are instant)`;
-                    })()}
-                  </div>
-                  {aiCompile.iter && aiCompile.total_iters && (
-                    <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-                      warmup {aiCompile.iter}/{aiCompile.total_iters}
-                    </div>
-                  )}
-                </div>
+                <CompileOverlay
+                  width={aiCompile.width}
+                  height={aiCompile.height}
+                  startedAt={aiCompile.started_at}
+                  estSeconds={aiCompile.est_seconds ?? 150}
+                  iter={aiCompile.iter}
+                  totalIters={aiCompile.total_iters}
+                />
               )}
               {!aiImageUrl && !aiCompile && (
                 <div className="absolute inset-0 flex items-center justify-center text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)] text-center px-4 bg-black">
                   {aiStatus === "connected" ? (
-                    <span>
-                      <span className="text-[color:var(--vj-info)]">
-                        connected
+                    aiServer && aiServer.readyCount < aiServer.workerCount ? (
+                      // Server reachable but workers still booting (loading
+                      // weights / fp8 / compile). Show what's happening so the
+                      // canvas isn't a silent void.
+                      <span>
+                        <span className="text-[color:var(--vj-info)] animate-pulse">
+                          preparing workers
+                        </span>
+                        <br />
+                        <span className="text-[color:var(--vj-accent)] tabular-nums">
+                          {aiServer.readyCount} / {aiServer.workerCount} ready
+                        </span>
+                        <br />
+                        <span className="text-[10px] mt-1 inline-block normal-case tracking-normal">
+                          loading model weights and JIT-compiling kernels —
+                          ~3 min on cold boot, then frames will start streaming
+                        </span>
                       </span>
-                      <br />
-                      press ▶ generate or hit space
-                    </span>
+                    ) : (
+                      <span>
+                        <span className="text-[color:var(--vj-info)]">
+                          connected
+                        </span>
+                        <br />
+                        press ▶ generate or hit space
+                      </span>
+                    )
                   ) : aiStatus === "connecting" ? (
                     <span className="text-[color:var(--vj-info)]">
                       negotiating webrtc…
