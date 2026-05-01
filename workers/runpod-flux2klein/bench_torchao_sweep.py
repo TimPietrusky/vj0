@@ -312,6 +312,7 @@ def bench_cell(label, apply_quant_fn, filter_name, args, results, ref_image=None
 
 
 def main():
+    global OUT_DIR  # we mutate the module-level OUT_DIR for bench_cell()
     parser = argparse.ArgumentParser()
     parser.add_argument("--size", type=int, default=256, help="Test resolution (default 256)")
     parser.add_argument("--steps", type=int, default=4, help="Inference steps (default 4)")
@@ -322,7 +323,6 @@ def main():
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    global OUT_DIR
     OUT_DIR = out_dir
 
     print(f"[init] device={torch.cuda.get_device_name(0)} cap={torch.cuda.get_device_capability(0)}", flush=True)

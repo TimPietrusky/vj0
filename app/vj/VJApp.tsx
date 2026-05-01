@@ -83,7 +83,21 @@ const SYSTEM_AUDIO_VALUE = "__system__";
  * server-reported `estSeconds`. A 4 Hz timer keeps the bar moving even when
  * nothing has happened on the network for tens of seconds.
  */
+type BootPhase =
+  | "loading_weights"
+  | "applying_fp8"
+  | "registering_compile_stubs"
+  | "warming_up";
+
+const BOOT_PHASE_TITLE: Record<BootPhase, string> = {
+  loading_weights: "Loading the AI model",
+  applying_fp8: "Optimising for speed",
+  registering_compile_stubs: "Almost there",
+  warming_up: "Warming up",
+};
+
 function CompileOverlay({
+  phase,
   width,
   height,
   startedAt,
@@ -91,8 +105,9 @@ function CompileOverlay({
   iter,
   totalIters,
 }: {
-  width: number;
-  height: number;
+  phase: BootPhase;
+  width?: number;
+  height?: number;
   startedAt: number;
   estSeconds: number;
   iter?: number;
@@ -105,20 +120,22 @@ function CompileOverlay({
   }, []);
 
   const elapsed = Math.max(0, (now - startedAt) / 1000);
-  // Cap at 99% so the bar doesn't sit at 100% for ages if the cold compile
-  // outruns our estimate (the actual estSeconds is server-reported and tends
-  // to be conservative, ~150 s, while real cold compile can hit ~165 s).
-  const pct = Math.min(0.99, elapsed / estSeconds);
+  const pct = Math.min(0.99, elapsed / Math.max(1, estSeconds));
   const remaining = Math.max(0, Math.ceil(estSeconds - elapsed));
+  // Resolution is only meaningful during warm-up; during model load there
+  // isn't a "current shape" yet (server's at default until first request).
+  const showSize = phase === "warming_up" && width && height;
 
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-4 bg-black/85 backdrop-blur-sm gap-3 font-mono">
       <div className="text-[11px] uppercase tracking-wider text-[color:var(--vj-info)] animate-pulse">
-        compiling worker for new shape
+        {BOOT_PHASE_TITLE[phase]}
       </div>
-      <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
-        {width}×{height}
-      </div>
+      {showSize && (
+        <div className="text-[28px] font-bold text-[color:var(--vj-accent)]">
+          {width}×{height}
+        </div>
+      )}
       <div className="w-56 h-1.5 bg-white/10 rounded-full overflow-hidden">
         <div
           className="h-full bg-[color:var(--vj-accent)] transition-[width] duration-200 ease-linear"
@@ -126,16 +143,13 @@ function CompileOverlay({
         />
       </div>
       <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] tabular-nums">
-        ~{remaining}s remaining · {Math.round(elapsed)}s elapsed
+        {Math.round(elapsed)}s elapsed · ~{remaining}s left
       </div>
-      {iter && totalIters && (
+      {phase === "warming_up" && iter && totalIters && (
         <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
-          warmup {iter}/{totalIters}
+          step {iter} of {totalIters}
         </div>
       )}
-      <div className="text-[10px] uppercase tracking-wider text-[color:var(--vj-ink-dim)] mt-2 max-w-xs">
-        one-time JIT cost · this shape will be instant on the next change
-      </div>
     </div>
   );
 }
@@ -228,12 +242,20 @@ export function VJApp() {
   const [audioSource, setAudioSource] = useState<AudioSource>("device");
   // Whether the browser supports getDisplayMedia. Used to gate the System
   // entry in the audio dropdown (Safari and older browsers don't have it).
-  const systemAudioSupported = useMemo(
-    () =>
+  //
+  // MUST start as `false` and be filled in via useEffect — NOT useMemo +
+  // `typeof navigator !== "undefined"`. SSR has no `navigator`, so a useMemo
+  // version evaluates to `false` on the server but `true` on the client's
+  // first render, which causes a hydration mismatch on the <option> + the
+  // Field's `title` hint. Effect-based init keeps the first client render
+  // identical to SSR, then flips to `true` after hydration completes.
+  const [systemAudioSupported, setSystemAudioSupported] = useState(false);
+  useEffect(() => {
+    setSystemAudioSupported(
       typeof navigator !== "undefined" &&
-      typeof navigator.mediaDevices?.getDisplayMedia === "function",
-    []
-  );
+        typeof navigator.mediaDevices?.getDisplayMedia === "function"
+    );
+  }, []);
 
   // Persisted scene + audio-features-visible toggle. We keep currentSceneId
   // as a derived selector because the VisualEngine internally tracks the
@@ -265,7 +287,6 @@ export function VJApp() {
     kleinAlpha: aiKleinAlpha,
     kleinSteps: aiKleinSteps,
     upscaleMode: aiUpscaleMode,
-    hideUi: aiHideUi,
     autoConnect: aiAutoConnect,
     promptPresets: aiPromptPresets,
     stageSharpen: aiStageSharpen,
@@ -285,7 +306,6 @@ export function VJApp() {
     setKleinAlpha: setAiKleinAlpha,
     setKleinSteps: setAiKleinSteps,
     setUpscaleMode: setAiUpscaleMode,
-    setHideUi: setAiHideUi,
     setAutoConnect: setAiAutoConnect,
     setStageSharpen: setAiStageSharpen,
     setStageScanlines: setAiStageScanlines,
@@ -469,14 +489,6 @@ export function VJApp() {
         return;
       }
 
-      if (e.key === "h" || e.key === "H") {
-        const s = useAiSettingsStore.getState();
-        s.setHideUi(!s.hideUi);
-        // No flushSettingsNow — hide UI doesn't affect the generation payload.
-        e.preventDefault();
-        return;
-      }
-
       if (aiBackend === "klein") {
         if (e.key === "ArrowUp") {
           adjustAlpha(0.02);
@@ -498,13 +510,11 @@ export function VJApp() {
     return () => window.removeEventListener("keydown", onKey);
   }, [
     aiBackend,
-    aiHideUi,
     aiPromptPresets,
     firePreset,
     fireRandomPreset,
     adjustAlpha,
     triggerFog,
-    setAiHideUi,
     rerollSeed,
   ]);
 
@@ -517,8 +527,9 @@ export function VJApp() {
   // that state so the UI can show "compiling 512x288… ~150s" instead of a
   // mysteriously frozen output canvas.
   const [aiCompile, setAiCompile] = useState<{
-    width: number;
-    height: number;
+    phase: BootPhase;
+    width?: number;
+    height?: number;
     n_steps?: number;
     iter?: number;
     total_iters?: number;
@@ -948,15 +959,36 @@ export function VJApp() {
             setAiGenTime(data.gen_time_ms);
             return;
           }
+          // Boot-phase messages from inference_server.py: "loading_weights",
+          // "applying_fp8", "registering_compile_stubs". These fire BEFORE
+          // the warmup events. We surface them in the overlay so the user
+          // sees "Loading the AI model" instead of a blank "preparing workers"
+          // box for two minutes.
+          if (data.type === "phase") {
+            const stage = data.stage as string | undefined;
+            // Transient phases ("loaded", anything we don't render) clear nothing.
+            const PHASE_MAP: Record<string, BootPhase> = {
+              loading_weights: "loading_weights",
+              applying_fp8: "applying_fp8",
+              registering_compile_stubs: "registering_compile_stubs",
+            };
+            if (stage && PHASE_MAP[stage]) {
+              setAiCompile({
+                phase: PHASE_MAP[stage],
+                est_seconds: data.est_seconds ?? 30,
+                started_at: Date.now(),
+              });
+            }
+            return;
+          }
           if (data.type === "compile") {
-            // Server is JIT-compiling for a new (width, height). The output
-            // canvas will stay frozen until "warmed" arrives. ~150s per shape.
-            // We accept progress events even if we missed the initial
-            // "compiling" emit — common case: client connects mid-warmup, after
-            // the server has already spoken "compiling" to a previous (or no)
-            // active channel. Without this, the overlay never appears.
+            // Warmup phase. Server emits "compiling" once, then
+            // "compiling_progress" per warmup iteration, then "warmed" when
+            // ready. We accept progress events even if we missed the initial
+            // "compiling" emit (common: client connects mid-warmup).
             if (data.status === "compiling" || data.status === "compiling_progress") {
               setAiCompile((prev) => ({
+                phase: "warming_up",
                 width: data.width,
                 height: data.height,
                 n_steps: data.n_steps,
@@ -968,8 +1000,9 @@ export function VJApp() {
                 // event, back-calculate started_at from the server-reported
                 // elapsed_ms so the countdown stays accurate.
                 started_at:
-                  prev?.started_at ??
-                  Date.now() - (typeof data.elapsed_ms === "number" ? data.elapsed_ms : 0),
+                  prev?.phase === "warming_up" && prev?.started_at
+                    ? prev.started_at
+                    : Date.now() - (typeof data.elapsed_ms === "number" ? data.elapsed_ms : 0),
               }));
             } else if (data.status === "warmed") {
               setAiCompile(null);
@@ -1426,26 +1459,6 @@ export function VJApp() {
 
   return (
     <div className="w-full min-h-screen flex flex-col">
-      {/* Fullscreen Hide-UI overlay */}
-      {aiHideUi && (
-        <div
-          onClick={() => setAiHideUi(false)}
-          className="fixed inset-0 z-50 bg-black flex items-center justify-center cursor-none"
-        >
-          {aiImageUrl && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={aiImageUrl}
-              alt="AI output"
-              className="max-w-full max-h-full object-contain"
-              style={{
-                imageRendering: aiUpscaleMode === "bilinear" ? "auto" : "auto",
-              }}
-            />
-          )}
-        </div>
-      )}
-
       <SystemsBar
         audioStatus={status}
         audioDeviceLabel={selectedDeviceLabel}
@@ -1456,8 +1469,6 @@ export function VJApp() {
         dmxFixtureCount={fixtures.length}
         dmxActiveCount={dmxActiveCount}
         lightingEnabled={lightingEnabled}
-        hideUi={aiHideUi}
-        onHideUi={() => setAiHideUi(!aiHideUi)}
       />
 
       {/* Error banner */}
@@ -1481,7 +1492,7 @@ export function VJApp() {
                   title={`Audio status: ${status}`}
                 >
                   <span
-                    className="vj-dot vj-dot--static"
+                    className="vj-dot"
                     style={{
                       color:
                         status === "running"
@@ -1598,13 +1609,16 @@ export function VJApp() {
                 on /vj/stage, so what you see here is what the projector
                 sees (the .vj-canvas-frame ::after CSS overlay supplies the
                 matching scanline+vignette FX). The placeholder text
-                overlays the canvas until a frame arrives. */}
-            <div
-              className="vj-canvas-frame relative flex items-center justify-center w-full"
-              style={{
-                aspectRatio: `${aiOutputWidth} / ${aiOutputHeight}`,
-              }}
-            >
+                overlays the canvas until a frame arrives.
+
+                The frame is locked to 16:9 regardless of output resolution.
+                Switching to 9:16 / 1:1 would otherwise blow the card up to
+                a tower or a square that pushes everything else off-screen.
+                Instead the canvas's `object-fit: contain` shrinks the
+                rendered bitmap inside the fixed frame — vertical content
+                shows as a tall rectangle centered with black side bars,
+                exactly as it'll appear on a 16:9 projector. */}
+            <div className="vj-canvas-frame relative flex items-center justify-center w-full aspect-video">
               <StageRenderer
                 ref={previewRendererRef}
                 sharpen={aiStagePixelate ? 0 : aiStageSharpen}
@@ -1614,6 +1628,7 @@ export function VJApp() {
               />
               {aiCompile && (
                 <CompileOverlay
+                  phase={aiCompile.phase}
                   width={aiCompile.width}
                   height={aiCompile.height}
                   startedAt={aiCompile.started_at}
@@ -1630,7 +1645,7 @@ export function VJApp() {
                       // weights / fp8 / compile). Show what's happening so the
                       // canvas isn't a silent void.
                       <span>
-                        <span className="text-[color:var(--vj-info)] animate-pulse">
+                        <span className="text-[color:var(--vj-info)]">
                           preparing workers
                         </span>
                         <br />
@@ -1745,7 +1760,6 @@ export function VJApp() {
               onFirePreset={firePreset}
               onUpdatePreset={updatePromptPreset}
               onRandom={fireRandomPreset}
-              onHideUi={() => setAiHideUi(!aiHideUi)}
               onFireFog={triggerFog}
               alpha={aiBackend === "klein" ? aiKleinAlpha : undefined}
               onAlphaDelta={

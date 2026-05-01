@@ -132,6 +132,23 @@ function handleWorkerLine(w, line) {
     console.log(`[worker ${w.gpu}]`, msg.log);
     return;
   }
+  // Boot phase events from inference_server.py (loading_weights, applying_fp8,
+  // registering_compile_stubs, loaded). Forward to the WebRTC client so the
+  // overlay can show "Loading the AI model" during the ~140s safetensors load
+  // instead of a silent "preparing workers" placeholder.
+  if (msg.status === "phase") {
+    console.log(`[worker ${w.gpu}] phase=${msg.stage} est=${msg.est_seconds || "?"}s`);
+    if (activeChannel?.readyState === "open") {
+      activeChannel.send(JSON.stringify({
+        type: "phase",
+        stage: msg.stage,
+        est_seconds: msg.est_seconds,
+        elapsed_ms: msg.elapsed_ms,
+        worker: w.gpu,
+      }));
+    }
+    return;
+  }
   if (msg.status === "ready") {
     console.log(`[worker ${w.gpu}] READY`);
     w.ready = true;

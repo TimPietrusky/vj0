@@ -47,21 +47,28 @@ export type OutputPreset = {
 };
 
 export const OUTPUT_PRESETS: OutputPreset[] = [
-  // 16:9 horizontal · ultra-fast (smallest 16:9 source that hits 4K cleanly)
-  // ×10 = 2560×1440 (QHD), ×15 = 3840×2160 (4K UHD), ×20 = 5120×2880 (5K)
+  // 16:9 horizontal — ladder from fast to true-720p quality.
+  // First/last hit standard targets exactly; the middle three are aspect-true
+  // 16:9-or-near-it intermediates for "I want quality between 512 and 720p"
+  // testing. Each new shape pays a one-time ~150 s torch.compile cost on
+  // first use, then ~20 s on cache hits forever after.
+
+  // ~45 fps dual-GPU. 16:9 exact. ×10 → QHD, ×15 → 4K (both integer).
   { id: "256x144", w: 256, h: 144, label: "256×144 · 16:9 · fast · ×15 → 4K" },
-  // 16:9 horizontal · standard live-VJ source
-  // ×5 = 2560×1440 (QHD), ×8 = 4096×2304 (~4K)
-  { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · max · ×5 → QHD" },
-  // 9:16 vertical · phone / portrait projector
-  // ×5 = 1440×2560 (QHD vertical), ×8 = 2304×4096 (~4K vertical)
-  { id: "288x512", w: 288, h: 512, label: "288×512 · 9:16 · vertical · ×5 → QHD" },
-  // 1:1 square · fast
-  // ×10 = 2560×2560 (square QHD), ×16 = 4096×4096 (~square 4K)
-  { id: "256x256", w: 256, h: 256, label: "256×256 · 1:1 · fast · ×10 → 2560²" },
-  // 1:1 square · max
-  // ×5 = 2560×2560 (square QHD), ×8 = 4096×4096
-  { id: "512x512", w: 512, h: 512, label: "512×512 · 1:1 · max · ×5 → 2560²" },
+  // ~45 fps dual-GPU. 16:9 exact. ×5 → QHD (integer).
+  { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · standard · ×5 → QHD" },
+  // ~24 fps dual-GPU. ~16:9 (1.71, slightly tall). 2.3× pixels of 512×288.
+  { id: "768x448", w: 768, h: 448, label: "768×448 · ~16:9 · balanced · 2.3× quality" },
+  // ~13 fps dual-GPU. 16:9 exact. 4× pixels of 512×288. ×2 → 2048×1152 (~FHD).
+  { id: "1024x576", w: 1024, h: 576, label: "1024×576 · 16:9 · high · 4× quality" },
+  // ~7 fps dual-GPU. 16:9 exact = real 720p. 6.25× pixels. ×2 → QHD, ×3 → 4K (both integer).
+  { id: "1280x720", w: 1280, h: 720, label: "1280×720 · 16:9 · 720p · ×2 → QHD" },
+
+  // 9:16 vertical — same ladder, transposed (phone / portrait projector).
+  { id: "288x512", w: 288, h: 512, label: "288×512 · 9:16 · vertical std · ×5 → QHD" },
+  { id: "448x768", w: 448, h: 768, label: "448×768 · ~9:16 · vertical balanced" },
+  { id: "576x1024", w: 576, h: 1024, label: "576×1024 · 9:16 · vertical high" },
+  { id: "720x1280", w: 720, h: 1280, label: "720×1280 · 9:16 · vertical 720p · ×2 → QHD" },
 ];
 
 export function findOutputPreset(w: number, h: number): OutputPreset | undefined {
@@ -100,7 +107,6 @@ interface AiSettingsState {
   kleinSteps: number;   // 1..4 — inference steps (2 = sweet spot, 4 = max quality)
   // Live-performance UX
   upscaleMode: UpscaleMode;       // display-time upscale quality in the output canvas
-  hideUi: boolean;                // H key: hide all panels, just show output
   autoConnect: boolean;           // auto-connect to configured backend on app load
   promptPresets: PromptPreset[];  // bound to number keys 1-9
   // Last-selected audio input device. Persisted so it survives reloads, and
@@ -142,7 +148,6 @@ interface AiSettingsState {
   setKleinAlpha: (value: number) => void;
   setKleinSteps: (value: number) => void;
   setUpscaleMode: (value: UpscaleMode) => void;
-  setHideUi: (value: boolean) => void;
   setAutoConnect: (value: boolean) => void;
   setPromptPresets: (value: PromptPreset[]) => void;
   updatePromptPreset: (index: number, preset: Partial<PromptPreset>) => void;
@@ -174,7 +179,6 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       kleinAlpha: 0.10,
       kleinSteps: 2,
       upscaleMode: "lanczos",
-      hideUi: false,
       autoConnect: false,
       promptPresets: DEFAULT_PROMPT_PRESETS.slice(),
       audioDeviceId: "",
@@ -209,7 +213,6 @@ export const useAiSettingsStore = create<AiSettingsState>()(
       setKleinSteps: (value) =>
         set({ kleinSteps: Math.max(1, Math.min(4, Math.round(value))) }),
       setUpscaleMode: (value) => set({ upscaleMode: value }),
-      setHideUi: (value) => set({ hideUi: value }),
       setAutoConnect: (value) => set({ autoConnect: value }),
       setPromptPresets: (value) => set({ promptPresets: value.slice(0, 9) }),
       updatePromptPreset: (index, preset) =>
@@ -247,12 +250,14 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "vj0-ai-settings-storage",
-      version: 5,
+      version: 7,
       migrate: (persisted: unknown, version: number) => {
         // v0/v1 had: outputSize: number, promptPresets: string[]
         // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
         // v3:       max output capped at 512×512 (768/1024 sizes removed for live perf)
         // v4:       default frameRate bumped 20 → 30 (dual-GPU server saturates ~28 fps)
+        // v5:       output preset list trimmed to integer-upscale-clean sizes
+        // v6:       hideUi field removed (the H-key fullscreen overlay was cut)
         const s = (persisted as Record<string, unknown>) || {};
         const out: Record<string, unknown> = { ...s };
 
@@ -314,6 +319,39 @@ export const useAiSettingsStore = create<AiSettingsState>()(
               const big = Math.max(w, h) > 320;
               out.outputWidth = big ? 512 : 256;
               out.outputHeight = big ? 512 : 256;
+            }
+          }
+        }
+
+        if (version < 6) {
+          // Drop the orphaned `hideUi` flag — the H-key fullscreen overlay
+          // was removed. Persist would otherwise re-hydrate it indefinitely.
+          delete out.hideUi;
+        }
+
+        if (version < 7) {
+          // Curated preset list: dropped 256×256 and 512×512 (1:1 squares
+          // not in current use), added a 16:9 / 9:16 ladder up to 720p
+          // (768×448, 1024×576, 1280×720 + their 9:16 mirrors). Re-snap any
+          // persisted (w,h) that's not in the new preset list to the closest
+          // surviving preset by aspect.
+          const w = typeof out.outputWidth === "number" ? out.outputWidth : 512;
+          const h = typeof out.outputHeight === "number" ? out.outputHeight : 288;
+          const stillValid = OUTPUT_PRESETS.some(
+            (p) => p.w === w && p.h === h
+          );
+          if (!stillValid) {
+            const aspect = w / h;
+            if (aspect > 1.4) {
+              out.outputWidth = 512; out.outputHeight = 288;       // 16:9 default
+            } else if (aspect < 0.7) {
+              out.outputWidth = 288; out.outputHeight = 512;       // 9:16 default
+            } else {
+              // Squarish → use the area to pick a horizontal-ish substitute
+              // (no 1:1 left in the list). Small → 256×144, big → 512×288.
+              const big = Math.max(w, h) > 320;
+              out.outputWidth = big ? 512 : 256;
+              out.outputHeight = big ? 288 : 144;
             }
           }
         }
