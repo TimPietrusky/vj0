@@ -132,12 +132,19 @@ def setup_pipeline():
         # fp8 ops in its kernel graph. See BENCH-2026-04-30.md Phase 3 for the
         # 24-30% latency win this delivers on Blackwell sm_120.
         emit_phase("applying_fp8", est_seconds=1)
-        log("applying TorchAO Float8DynamicActivationFloat8WeightConfig (PerRow) on transformer...")
+        log("applying TorchAO Float8DynamicActivationFloat8WeightConfig (PerTensor) on transformer...")
+        # PerTensor was the winner of bench_torchao_sweep.py against PerRow on
+        # Blackwell sm_120: same VRAM (12.3 GB), 1 ms faster, half the
+        # quality drift (mse 0.0008 vs 0.0015 vs bf16 reference). One scale
+        # factor per weight matrix means less dispatch overhead than per-row,
+        # and the global-scale calibration apparently has fewer outliers than
+        # per-row in this network. See torchao-sweep-summary.json for the full
+        # 16-variant table that picked this config.
         try:
             from torchao.quantization import quantize_, Float8DynamicActivationFloat8WeightConfig
-            from torchao.quantization.granularity import PerRow
+            from torchao.quantization.granularity import PerTensor
             try:
-                cfg = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())
+                cfg = Float8DynamicActivationFloat8WeightConfig(granularity=PerTensor())
             except TypeError:
                 cfg = Float8DynamicActivationFloat8WeightConfig()
             t_q = time.perf_counter()
