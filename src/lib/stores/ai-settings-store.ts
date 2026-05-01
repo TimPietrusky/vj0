@@ -24,11 +24,21 @@ export type PromptPreset = {
   prompt: string;
 };
 
-// Output resolution presets for the AI generator. FLUX.2 requires both
-// dimensions divisible by 16. We cap at 512×512 — bigger than that costs
-// too much per-frame for live performance. Projector-friendly widescreen
-// options dominate the small end (16:9 and near-16:9 wide formats), since
-// that's what most VJ rigs actually output to.
+// Output resolution presets for the AI generator.
+//
+// HARD RULES this list satisfies:
+//   1. FLUX.2 requires both source dimensions divisible by 16.
+//   2. Source × INTEGER N must land at or above a standard display target
+//      (2560×1440 QHD or 3840×2160 4K) so the StageRenderer canvas can
+//      upscale losslessly with the source-pixel UV math kept aligned.
+//
+// Note about 1080p: 1080 ÷ 16 = 67.5 — so NO div-by-16 source can hit exact
+// 1920×1080 with integer N. The closest path is QHD (2560×1440) which
+// displays beautifully on a 1080p monitor (browser bilinear-shrinks the
+// canvas; ~25% extra source pixels = imperceptible loss + overshoot
+// protection on hi-DPI screens).
+//
+// Each row below documents the integer-N upscale path it offers.
 export type OutputPreset = {
   id: string;
   label: string;
@@ -37,16 +47,21 @@ export type OutputPreset = {
 };
 
 export const OUTPUT_PRESETS: OutputPreset[] = [
-  { id: "192x112", w: 192, h: 112, label: "192×112 · ~16:9 · ultra-fast (projector)" },
-  { id: "256x144", w: 256, h: 144, label: "256×144 · 16:9 · fast (projector)" },
-  { id: "256x256", w: 256, h: 256, label: "256×256 · 1:1 · fast" },
-  { id: "320x176", w: 320, h: 176, label: "320×176 · ~16:9 · fast (projector)" },
-  { id: "384x224", w: 384, h: 224, label: "384×224 · ~16:9 · balanced (projector)" },
-  { id: "384x384", w: 384, h: 384, label: "384×384 · 1:1 · balanced" },
-  { id: "448x256", w: 448, h: 256, label: "448×256 · ~16:9 · balanced (projector)" },
-  { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · max (projector)" },
-  { id: "288x512", w: 288, h: 512, label: "288×512 · 9:16 · vertical (phone/portrait)" },
-  { id: "512x512", w: 512, h: 512, label: "512×512 · 1:1 · max" },
+  // 16:9 horizontal · ultra-fast (smallest 16:9 source that hits 4K cleanly)
+  // ×10 = 2560×1440 (QHD), ×15 = 3840×2160 (4K UHD), ×20 = 5120×2880 (5K)
+  { id: "256x144", w: 256, h: 144, label: "256×144 · 16:9 · fast · ×15 → 4K" },
+  // 16:9 horizontal · standard live-VJ source
+  // ×5 = 2560×1440 (QHD), ×8 = 4096×2304 (~4K)
+  { id: "512x288", w: 512, h: 288, label: "512×288 · 16:9 · max · ×5 → QHD" },
+  // 9:16 vertical · phone / portrait projector
+  // ×5 = 1440×2560 (QHD vertical), ×8 = 2304×4096 (~4K vertical)
+  { id: "288x512", w: 288, h: 512, label: "288×512 · 9:16 · vertical · ×5 → QHD" },
+  // 1:1 square · fast
+  // ×10 = 2560×2560 (square QHD), ×16 = 4096×4096 (~square 4K)
+  { id: "256x256", w: 256, h: 256, label: "256×256 · 1:1 · fast · ×10 → 2560²" },
+  // 1:1 square · max
+  // ×5 = 2560×2560 (square QHD), ×8 = 4096×4096
+  { id: "512x512", w: 512, h: 512, label: "512×512 · 1:1 · max · ×5 → 2560²" },
 ];
 
 export function findOutputPreset(w: number, h: number): OutputPreset | undefined {
@@ -232,7 +247,7 @@ export const useAiSettingsStore = create<AiSettingsState>()(
     }),
     {
       name: "vj0-ai-settings-storage",
-      version: 4,
+      version: 5,
       migrate: (persisted: unknown, version: number) => {
         // v0/v1 had: outputSize: number, promptPresets: string[]
         // v2 has:   outputWidth/outputHeight,  promptPresets: {label, prompt}[]
@@ -271,6 +286,36 @@ export const useAiSettingsStore = create<AiSettingsState>()(
           // Leave 10 alone (some users intentionally pick low for laptop-power
           // setups), and leave 60 alone (already smooth-by-choice).
           if (out.frameRate === 20) out.frameRate = 30;
+        }
+
+        if (version < 5) {
+          // Resolution presets were trimmed to only ones that integer-upscale
+          // to standard display targets (QHD 2560×1440 / 4K 3840×2160). The
+          // dropped legacy presets (192×112, 320×176, 384×224, 384×384,
+          // 448×256) didn't satisfy that constraint. Snap them to the nearest
+          // valid preset by aspect ratio.
+          const w = typeof out.outputWidth === "number" ? out.outputWidth : 512;
+          const h = typeof out.outputHeight === "number" ? out.outputHeight : 288;
+          const stillValid = OUTPUT_PRESETS.some(
+            (p) => p.w === w && p.h === h
+          );
+          if (!stillValid) {
+            const aspect = w / h;
+            if (aspect > 1.4) {
+              // 16:9-ish horizontal → 512×288 (the standard live VJ resolution)
+              out.outputWidth = 512;
+              out.outputHeight = 288;
+            } else if (aspect < 0.7) {
+              // 9:16-ish vertical → 288×512
+              out.outputWidth = 288;
+              out.outputHeight = 512;
+            } else {
+              // Square-ish → match by size (≤ 320 long side → 256², else 512²)
+              const big = Math.max(w, h) > 320;
+              out.outputWidth = big ? 512 : 256;
+              out.outputHeight = big ? 512 : 256;
+            }
+          }
         }
 
         return out as unknown as AiSettingsState;

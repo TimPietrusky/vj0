@@ -81,6 +81,19 @@ interface StageRendererProps {
   /** Pixelate block size in source pixels. 0 = bypass, 1 = unchanged,
    *  N>1 = each NxN source-pixel block becomes a single solid colour. */
   pixelate?: number;
+  /** Target minimum long side for the canvas's *internal* pixel grid.
+   *  Default 1920 → "Full HD or above on the long side", aligned with
+   *  standard display resolutions (1080p, 1440p, 4K — long sides 1920, 2560,
+   *  3840). The canvas pixel size is computed as `source × ceil(target/sourceLong)`,
+   *  which keeps the upscale at an INTEGER multiplier of the source — important
+   *  because pixelate's UV-snap math and sharpen's source-pixel kernel both
+   *  expect integer-aligned grids; non-integer scaling would introduce LINEAR
+   *  blur between source pixels.
+   *
+   *  Pass 3840 for 4K-equivalent canvases (downloads ≥ ~4K resolution).
+   *  CSS still controls the *displayed* size; this only changes the byte size
+   *  of the rendered image. */
+  targetLongSide?: number;
   className?: string;
   style?: React.CSSProperties;
 }
@@ -88,7 +101,7 @@ interface StageRendererProps {
 export const StageRenderer = forwardRef<
   StageRendererHandle,
   StageRendererProps
->(function StageRenderer({ sharpen, pixelate, className, style }, ref) {
+>(function StageRenderer({ sharpen, pixelate, targetLongSide, className, style }, ref) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   const programRef = useRef<WebGLProgram | null>(null);
@@ -98,6 +111,7 @@ export const StageRenderer = forwardRef<
   const uPixelateRef = useRef<WebGLUniformLocation | null>(null);
   const sharpenRef = useRef(sharpen);
   const pixelateRef = useRef(pixelate ?? 0);
+  const targetLongSideRef = useRef(Math.max(1, Math.round(targetLongSide ?? 1920)));
 
   useEffect(() => {
     sharpenRef.current = sharpen;
@@ -106,6 +120,10 @@ export const StageRenderer = forwardRef<
   useEffect(() => {
     pixelateRef.current = pixelate ?? 0;
   }, [pixelate]);
+
+  useEffect(() => {
+    targetLongSideRef.current = Math.max(1, Math.round(targetLongSide ?? 1920));
+  }, [targetLongSide]);
 
   // One-shot WebGL setup. Compiles the program, allocates the texture, sets
   // up the full-screen quad. We render in `drawBitmap`, not on a RAF loop —
@@ -190,11 +208,29 @@ export const StageRenderer = forwardRef<
       const canvas = canvasRef.current;
       if (!gl || !prog || !tex || !canvas) return;
 
-      // Match canvas pixel size to source. CSS scales the canvas up to fill
-      // the viewport, so the sharpen kernel always operates on source pixels.
-      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
+      // Canvas internal pixel size = source × N where N is the smallest
+      // INTEGER multiplier that gets the long side ≥ targetLongSide (default
+      // 1920 → Full HD-equivalent). CSS still controls the *displayed* size
+      // (small in the panel, full-screen on stage). The shader's u_texel
+      // uniform references SOURCE pixel size, not canvas size, so the visual
+      // is identical regardless of N — pixelate blocks stay the same NxN
+      // source pixels, sharpen samples N/S/E/W in source space.
+      //
+      // Examples (default targetLongSide=1920):
+      //   512×288 → ×4 → 2048×1152
+      //   384×224 → ×5 → 1920×1120 (long side exactly 1920)
+      //   256×144 → ×8 → 2048×1152
+      //   192×112 → ×10 → 1920×1120
+      //   288×512 → ×4 → 1152×2048 (vertical 9:16)
+      //
+      // Pass targetLongSide={3840} for 4K-equivalent canvases.
+      const sourceLongSide = Math.max(bitmap.width, bitmap.height);
+      const scale = Math.max(1, Math.ceil(targetLongSideRef.current / sourceLongSide));
+      const targetW = bitmap.width * scale;
+      const targetH = bitmap.height * scale;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
         gl.viewport(0, 0, canvas.width, canvas.height);
       }
 
@@ -221,5 +257,20 @@ export const StageRenderer = forwardRef<
     },
   }));
 
-  return <canvas ref={canvasRef} className={className} style={style} />;
+  // When pixelate is on, the source image is intentionally low-frequency
+  // (each NxN block is one solid colour). Browser bilinear upscaling — the
+  // default — would blur block edges, defeating the look. `image-rendering:
+  // pixelated` switches the upscale to nearest-neighbour, giving crisp blocks
+  // at any display size. Lossless full-HD: WebGL renders at source res,
+  // browser does the cheap nearest upscale. With pixelate off we keep the
+  // default LINEAR upscale so the unsharp-mask sharpen still has soft edges
+  // to work with.
+  const imageRendering = (pixelate ?? 0) >= 1 ? "pixelated" : undefined;
+  return (
+    <canvas
+      ref={canvasRef}
+      className={className}
+      style={imageRendering ? { ...style, imageRendering } : style}
+    />
+  );
 });
