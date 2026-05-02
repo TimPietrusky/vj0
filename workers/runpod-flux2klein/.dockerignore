@@ -1,0 +1,62 @@
+# Keep the build context small + fast on Blacksmith.
+# Only `Dockerfile`, `entrypoint.sh`, `server.js`, `inference_server.py`,
+# `package.json`, and `requirements.txt` are needed for the image.
+
+# bench scripts (~30 files, irrelevant to runtime)
+bench_*.py
+test_*.py
+optimize*.py
+verify*.py
+gallery_vj.py
+probe_nunchaku.py
+sweep_resolutions.py
+teacache_klein.py
+smoke.py
+
+# bench output dirs
+bench-*/
+*-bench/
+*-bench-*/
+*-test/
+*-out/
+*-v2/
+*-v3/
+final-*/
+gallery-*/
+unrelated/
+classic-v2/
+controlnet-test/
+max-speed-v2/
+max-v3/
+more-steps/
+noise-floor/
+one-step/
+sdturbo-test/
+smoke-out/
+sweep-out/
+verify-out/
+verify-real/
+zimage-bench*/
+
+# bench summaries
+*.json
+torchao-sweep-*.json
+baseline-summary.json
+
+# Markdown docs (read in repo, not needed in image)
+*.md
+
+# Setup helpers (replaced by Dockerfile + entrypoint)
+setup.sh
+snipe-pod.sh
+serve_demo.sh
+demo.html
+test_dispatch.js
+
+# Editor / VCS noise
+.git/
+.gitignore
+.DS_Store
+__pycache__/
+*.pyc
+node_modules/
