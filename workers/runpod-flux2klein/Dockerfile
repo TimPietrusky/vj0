@@ -37,10 +37,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 # - curl/ca-certs/git: fetching pip packages from VCS (pinned diffusers commit)
 # - rsync: Inductor cache hydration (/workspace -> /tmp at boot)
 # - libgomp1: torch's CPU OpenMP runtime
+# - gcc/g++/python3-dev: REQUIRED at RUNTIME by Triton — torch.compile JITs
+#   small CUDA helper modules via tritonbuild; without a C compiler in $PATH
+#   the first compile call fails with:
+#     "Failed to find C compiler. Please specify via CC environment variable"
+#   The stock runpod/pytorch image bundles these; the cuda:runtime base does
+#   not. Don't drop them to slim the image — Triton breaks at first frame.
 # - openssh-server: optional, only used if PUBLIC_KEY env var is set at runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates git rsync \
         libgomp1 \
+        gcc g++ \
         python3 python3-pip python3-venv python3-dev \
         openssh-server \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
