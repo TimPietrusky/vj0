@@ -32,7 +32,14 @@
  * - getElapsedMs() is cheap to poll for a UI timer (uses performance.now()).
  *   Drive it with a 250 ms timer in the React layer; do NOT put it in
  *   requestAnimationFrame React state.
+ * - On stop, MP4 output is post-processed by `remuxFmp4ToFlatMp4` to flip
+ *   it from fragmented (which MediaRecorder always emits) to a non-
+ *   fragmented layout that DaVinci Resolve / Premiere / FCP will actually
+ *   import. WebM passes through unchanged. The remux is lossless and
+ *   typically runs in a few hundred ms.
  */
+
+import { canRemux, remuxFmp4ToFlatMp4 } from "./remux";
 
 export interface RecordingResult {
   /** Encoded video. MIME type matches `mimeType` below. */
@@ -45,6 +52,13 @@ export interface RecordingResult {
   durationMs: number;
   /** Final blob size in bytes. */
   sizeBytes: number;
+  /**
+   * True when the blob was rebuilt as a non-fragmented MP4 by the post-stop
+   * remux pass. False for the fragmented passthrough fallback (we kept the
+   * raw MediaRecorder output because the remux failed) and for WebM (no
+   * remux is needed or possible there).
+   */
+  remuxed: boolean;
 }
 
 export interface RecordingEngineDeps {
@@ -296,19 +310,57 @@ export class RecordingEngine {
     });
 
     recorder.addEventListener("stop", () => {
-      const blob = new Blob(this.chunks, { type: mime.mimeType });
+      const rawBlob = new Blob(this.chunks, { type: mime.mimeType });
       const durationMs = this.startTimeMs
         ? performance.now() - this.startTimeMs
         : 0;
-      const result: RecordingResult = {
-        blob,
-        mimeType: mime.mimeType,
-        extension: mime.extension,
-        durationMs,
-        sizeBytes: blob.size,
-      };
+      // Capture the resolver here — cleanupAfterStop() nulls the recorder
+      // refs but we need to keep the resolver alive across the async
+      // remux below.
+      const resolve = this.resolveStop;
+      const reject = this.rejectStop;
       this.cleanupAfterStop();
-      this.resolveStop?.(result);
+
+      // Remux fMP4 → flat MP4 so NLEs can import it. Hand back the raw
+      // blob if the remux fails (better a fragmented file than nothing —
+      // the user can still open it in VLC / a browser, and ffmpeg can
+      // remux it manually). WebM skips the remux entirely.
+      const finalize = (blob: Blob, remuxed: boolean) => {
+        const result: RecordingResult = {
+          blob,
+          mimeType: mime.mimeType,
+          extension: mime.extension,
+          durationMs,
+          sizeBytes: blob.size,
+          remuxed,
+        };
+        resolve?.(result);
+      };
+
+      if (!canRemux(mime.mimeType)) {
+        finalize(rawBlob, false);
+        return;
+      }
+
+      remuxFmp4ToFlatMp4(rawBlob).then(
+        (flatBlob) => finalize(flatBlob, true),
+        (err: unknown) => {
+          // Don't fail the whole recording on a remux error — the user
+          // gets a working (if fragmented) MP4 plus a warning surfaced
+          // via the rejected branch is a worse UX than a slightly less
+          // editable file. Log to console for diagnostics, hand back the
+          // raw blob.
+          console.warn(
+            "[recording] remux failed, returning raw fragmented MP4:",
+            err
+          );
+          // We could hand the error to rejectStop here, but the user is
+          // mid-VJ-set — better to give them the file and let them remux
+          // with ffmpeg later than to fail loudly.
+          void reject; // keep the linter happy; intentionally unused
+          finalize(rawBlob, false);
+        }
+      );
     });
 
     recorder.addEventListener("error", (event: Event) => {

@@ -19,6 +19,15 @@ const express = require("express");
 const wrtc = require("@roamhq/wrtc");
 const { spawn, execSync } = require("child_process");
 
+// Prevent node from crashing on unhandled errors — log and continue.
+// WebRTC peer teardown and worker pipe errors are the usual culprits.
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT]", err.message, err.stack);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED_REJECTION]", reason);
+});
+
 const PORT = Number(process.env.PORT || 3000);
 const INFERENCE_SCRIPT = process.env.INFERENCE_SCRIPT || "./inference_server.py";
 const ICE_GATHER_TIMEOUT_MS = Number(process.env.ICE_GATHER_TIMEOUT_MS || 10000);
@@ -110,8 +119,17 @@ function spawnWorker(gpu) {
   });
 
   proc.on("close", (code) => {
-    console.log(`[worker ${gpu}] exited code=${code}`);
+    console.log(`[worker ${gpu}] exited code=${code}, respawning in 3s...`);
     w.ready = false;
+    w.framePending = 0;
+    // Auto-respawn: remove dead worker, spawn fresh one after a brief delay
+    // so the GPU has time to release resources.
+    setTimeout(() => {
+      const idx = workers.indexOf(w);
+      if (idx >= 0) workers.splice(idx, 1);
+      console.log(`[worker ${gpu}] respawning now`);
+      spawnWorker(gpu);
+    }, 3000);
   });
 
   proc.on("error", (err) => {

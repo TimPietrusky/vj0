@@ -19,12 +19,14 @@ Winning config (see BENCH-2026-04-30.md for the full grind; see RESULTS.md for t
   + 4 inference steps default (production quality target — flip to 2 for speed-first)
   + alpha 0.05-0.18 (subtle SDXL-turbo-like input bias; up to 0.5 for hallucinated img2img)
 
-Per-frame latency on RTX 5090 (driver 580, includes VAE encode of input):
-  256² / 4 steps ≈ 38-45 ms (22-26 fps)   ← production target
-  384² / 4 steps ≈ 65-75 ms (13-15 fps)
-  512² / 4 steps ≈ 105-123 ms (8-10 fps)
+Per-frame latency on RTX 5090 (driver 580, cu130, includes VAE encode):
+  256² / 4 steps ≈ 41 ms (24 fps)         ← production target
+  512×288 / 4 steps ≈ 65 ms (15.4 fps)    ← cu130 is 12% faster than cu128 here
   256² / 2 steps ≈ 25-30 ms (33-40 fps)   ← speed-first preset
-  512² / 2 steps ≈ 75-100 ms (10-13 fps)
+
+  cu128 reference (same hardware):
+  256² / 4 steps ≈ 42 ms (23.7 fps)
+  512×288 / 4 steps ≈ 74 ms (13.5 fps)
 
 VRAM ≈ 12.3 GB (vs 16 GB without fp8) — 3.7 GB freed for batched inference / bigger res.
 

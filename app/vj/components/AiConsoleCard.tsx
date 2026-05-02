@@ -49,10 +49,6 @@ interface AiConsoleCardProps {
   onKleinAlphaChange: (v: number) => void;
   aiKleinSteps: number;
   onKleinStepsChange: (v: number) => void;
-  aiCaptureSize: number;
-  onCaptureSizeChange: (v: number) => void;
-  aiOutputLong: number;
-
   // Stage FX (display passes — only what the preview canvas needs)
   aiStageSharpen: number;
   aiStagePixelate: boolean;
@@ -110,9 +106,6 @@ export function AiConsoleCard({
   onKleinAlphaChange,
   aiKleinSteps,
   onKleinStepsChange,
-  aiCaptureSize,
-  onCaptureSizeChange,
-  aiOutputLong,
   aiStageSharpen,
   aiStagePixelate,
   aiStagePixelateSize,
@@ -130,13 +123,6 @@ export function AiConsoleCard({
   aiLogs,
 }: AiConsoleCardProps) {
   const sliderFillPct = Math.round((aiKleinAlpha / 0.5) * 100);
-  // Klein renders sharpest when the client capture size matches the
-  // output long side. When it doesn't, the capture chip telegraphs the
-  // mismatch (border + label go magenta, inline → action appears).
-  // Owning both the bad value and the remediation in one chip keeps
-  // the cause and the fix visually adjacent.
-  const captureMismatch =
-    aiBackendKlein && aiCaptureSize !== aiOutputLong;
 
   return (
     <div className="vj-panel p-2 flex flex-col gap-2">
@@ -328,57 +314,12 @@ export function AiConsoleCard({
                 </select>
               </label>
             )}
-            {/* Note: when capture ≠ output long side, the remediation
-                lives inline on the capture chip below (Row 2) — same
-                component owns the broken state + the fix, so they
-                stay together instead of orphaning a separate button. */}
           </div>
 
           {/* Row 2 — Generation params. Permanent, not collapsed: the
               chip language already collapses each one to ~80–130 px so
-              the four fit on a single row in the available column,
-              and these values (capture/fps/seed/upscale) are useful
-              enough to verify at a glance that they don't deserve to
-              hide behind a disclosure. Visual hierarchy vs Row 1 comes
-              from order + Row 1's magenta accent button, not framing. */}
+              they fit on a single row in the available column. */}
           <div className="flex items-center gap-1.5 flex-wrap">
-            <label
-              className={`vj-chip${captureMismatch ? " vj-chip--warn" : ""}`}
-              title={
-                captureMismatch
-                  ? `Capture ${aiCaptureSize} ≠ output long side ${aiOutputLong}. Klein renders sharpest when they match — click → to update.`
-                  : aiBackendKlein
-                    ? "Client capture resolution — matched to output long side for sharpest Klein output."
-                    : "Client capture resolution"
-              }
-            >
-              <span className="vj-chip__label">capture</span>
-              <select
-                value={aiCaptureSize}
-                onChange={(e) => onCaptureSizeChange(Number(e.target.value))}
-                className="vj-chip__select"
-              >
-                <option value={64}>64</option>
-                <option value={128}>128</option>
-                <option value={256}>256</option>
-                <option value={512}>512</option>
-              </select>
-              {/* Corner badge — only rendered when warn is active. It's
-                  absolute-positioned so it doesn't reserve any layout
-                  slot when missing (chip width stays constant without
-                  hidden placeholder space). */}
-              {captureMismatch && (
-                <button
-                  type="button"
-                  onClick={() => onCaptureSizeChange(aiOutputLong)}
-                  className="vj-chip__alert"
-                  title={`Capture ${aiCaptureSize} ≠ output long side ${aiOutputLong} — click to match for sharper Klein output`}
-                  aria-label={`Match capture to output long side ${aiOutputLong}`}
-                >
-                  !
-                </button>
-              )}
-            </label>
             <label className="vj-chip" title="Target frame rate">
               <span className="vj-chip__label">fps</span>
               <select
@@ -455,12 +396,12 @@ export function AiConsoleCard({
               {aiShowCaptureDebug && (
                 <div className="flex flex-col gap-1 rounded border border-[color:var(--vj-edge-hot)] bg-black/50 p-2">
                   <div className="text-[9px] uppercase tracking-wider font-mono text-[color:var(--vj-ink-dim)]">
-                    sending {aiCaptureSize} → {aiOutputWidth}×{aiOutputHeight}
+                    sending {aiOutputWidth}×{aiOutputHeight}
                   </div>
                   <canvas
                     ref={aiDebugCanvasRef}
-                    width={aiCaptureSize}
-                    height={aiCaptureSize}
+                    width={aiOutputWidth}
+                    height={aiOutputHeight}
                     className="rounded bg-black self-center"
                     style={{
                       width: 160,

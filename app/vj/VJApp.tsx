@@ -247,7 +247,6 @@ export function VJApp() {
     sendFrames: aiSendFrames,
     showCaptureDebug: aiShowCaptureDebug,
     prompt: aiPrompt,
-    captureSize: aiCaptureSize,
     outputWidth: aiOutputWidth,
     outputHeight: aiOutputHeight,
     frameRate: aiFrameRate,
@@ -268,7 +267,6 @@ export function VJApp() {
     setSendFrames: setAiSendFrames,
     setShowCaptureDebug: setAiShowCaptureDebug,
     setPrompt: setAiPrompt,
-    setCaptureSize: setAiCaptureSize,
     setOutputSize: setAiOutputSize,
     setFrameRate: setAiFrameRate,
     setSeed: setAiSeed,
@@ -285,8 +283,6 @@ export function VJApp() {
     setRecordingResolution,
     updatePromptPreset,
   } = useAiSettingsStore();
-
-  const aiOutputLong = Math.max(aiOutputWidth, aiOutputHeight);
 
   // BroadcastChannel to the /vj/stage tab
   const stageChannelRef = useRef<BroadcastChannel | null>(null);
@@ -323,20 +319,11 @@ export function VJApp() {
   const flushSettingsNow = useCallback(() => {
     if (!aiTransport.isConnected()) return;
     const s = useAiSettingsStore.getState();
-    const aspect = s.outputWidth / s.outputHeight;
-    const captureW =
-      aspect >= 1
-        ? s.captureSize
-        : Math.max(16, Math.round(s.captureSize * aspect));
-    const captureH =
-      aspect >= 1
-        ? Math.max(16, Math.round(s.captureSize / aspect))
-        : s.captureSize;
     const payload: Record<string, unknown> = {
       prompt: s.prompt,
       seed: s.seed,
-      captureWidth: captureW,
-      captureHeight: captureH,
+      captureWidth: s.outputWidth,
+      captureHeight: s.outputHeight,
       width: s.outputWidth,
       height: s.outputHeight,
     };
@@ -587,6 +574,10 @@ export function VJApp() {
   const [aiLogs, setAiLogs] = useState<string[]>([]);
   const [aiImageUrl, setAiImageUrl] = useState<string | null>(null);
   const [aiGenTime, setAiGenTime] = useState<number | null>(null);
+  // Actual received-frames-per-second counter — measures real canvas output
+  // rate (what the user sees), not per-frame server latency.
+  const [aiRecvFps, setAiRecvFps] = useState<number | null>(null);
+  const aiRecvFpsRef = useRef({ count: 0, last: performance.now() });
   // Per-stage timing breakdown emitted by inference_server.py — surfaces where
   // the frame budget is going (vae_encode vs transformer vs jpeg vs python glue).
   // Useful for spotting the next bottleneck without re-instrumenting the worker.
@@ -773,7 +764,13 @@ export function VJApp() {
         await audioEngine.init(source);
         audioEngineRef.current = audioEngine;
 
-        const visualEngine = new VisualEngine(canvas, audioEngine, SCENES);
+        const visualEngine = new VisualEngine(
+          canvas,
+          audioEngine,
+          SCENES,
+          aiOutputWidth,
+          aiOutputHeight,
+        );
         visualEngineRef.current = visualEngine;
 
         const lightingEngine = new LightingEngine(
@@ -805,8 +802,15 @@ export function VJApp() {
         );
       }
     },
-    [fetchDevices, handleLightingFrame, handleDmxFrame, fixtures, persistedSceneId]
+    [fetchDevices, handleLightingFrame, handleDmxFrame, fixtures, persistedSceneId, aiOutputWidth, aiOutputHeight]
   );
+
+  // Resize the waveform canvas when the AI output resolution changes so the
+  // input canvas always matches the output dimensions — what you see is what
+  // the AI sees, no hidden crop or stretch step.
+  useEffect(() => {
+    visualEngineRef.current?.handleResize(aiOutputWidth, aiOutputHeight);
+  }, [aiOutputWidth, aiOutputHeight]);
 
   // ============================================================================
   // UI event handlers
@@ -1103,6 +1107,17 @@ export function VJApp() {
         return;
       }
 
+      // Count received frames for real FPS measurement
+      const fpsState = aiRecvFpsRef.current;
+      fpsState.count++;
+      const now = performance.now();
+      const elapsed = now - fpsState.last;
+      if (elapsed >= 1000) {
+        setAiRecvFps(Math.round((fpsState.count / elapsed) * 1000));
+        fpsState.count = 0;
+        fpsState.last = now;
+      }
+
       const url = URL.createObjectURL(frame.blob);
       setAiImageUrl((prev) => {
         if (prev) URL.revokeObjectURL(prev);
@@ -1259,11 +1274,11 @@ export function VJApp() {
       return;
     }
 
-    const outAspect = aiOutputWidth / aiOutputHeight;
-    const capW =
-      outAspect >= 1 ? aiCaptureSize : Math.max(16, Math.round(aiCaptureSize * outAspect));
-    const capH =
-      outAspect >= 1 ? Math.max(16, Math.round(aiCaptureSize / outAspect)) : aiCaptureSize;
+    // Capture at the output resolution — VisualEngine already renders at
+    // the same dimensions, so this is a straight 1:1 copy. No crop, no
+    // scale, no aspect-ratio mismatch.
+    const capW = aiOutputWidth;
+    const capH = aiOutputHeight;
     const resolutionKey = capW * 10000 + capH;
     if (!sender.captureCanvas || sender.resolution !== resolutionKey) {
       sender.captureCanvas = document.createElement("canvas");
@@ -1278,21 +1293,7 @@ export function VJApp() {
       return;
     }
 
-    let srcCropW = src.width;
-    let srcCropH = src.height;
-    if (src.width / src.height > outAspect) {
-      srcCropW = src.height * outAspect;
-    } else {
-      srcCropH = src.width / outAspect;
-    }
-    const srcX = (src.width - srcCropW) / 2;
-    const srcY = (src.height - srcCropH) / 2;
-
-    ctx.drawImage(
-      src,
-      srcX, srcY, srcCropW, srcCropH,
-      0, 0, capW, capH
-    );
+    ctx.drawImage(src, 0, 0, capW, capH);
 
     sender.lastFrameTime = now;
     sender.frameCount++;
@@ -1332,7 +1333,7 @@ export function VJApp() {
       "image/jpeg",
       0.85
     );
-  }, [aiTransport, aiCaptureSize, aiFrameRate, aiOutputWidth, aiOutputHeight]);
+  }, [aiTransport, aiFrameRate, aiOutputWidth, aiOutputHeight]);
 
   useEffect(() => {
     // Catch-all for non-hotkey state changes (slider drags, backend swap,
@@ -1346,7 +1347,6 @@ export function VJApp() {
     aiBackend,
     aiPrompt,
     aiSeed,
-    aiCaptureSize,
     aiOutputWidth,
     aiOutputHeight,
     aiKleinAlpha,
@@ -1550,6 +1550,14 @@ export function VJApp() {
       <SystemsBar
         audioStatus={status}
         audioDeviceLabel={selectedDeviceLabel}
+        devices={devices}
+        selectedDeviceId={selectedDeviceId}
+        onDeviceChange={handleDeviceChange}
+        systemAudioSupported={systemAudioSupported}
+        systemAudioValue={SYSTEM_AUDIO_VALUE}
+        scenes={SCENES}
+        currentSceneId={currentSceneId}
+        onSceneChange={handleSceneChange}
         aiStatus={aiStatus}
         aiBackend={aiBackend}
         onBackendChange={(b) => {
@@ -1563,6 +1571,7 @@ export function VJApp() {
         onConnect={() => void aiTransport.start()}
         onDisconnect={() => void aiTransport.stop()}
         aiGenTimeMs={aiStatus === "connected" ? aiGenTime : null}
+        aiRecvFps={aiStatus === "connected" ? aiRecvFps : null}
         aiTiming={aiStatus === "connected" ? aiTiming : null}
         dmxStatus={dmxStatus}
         dmxFixtureCount={fixtures.length}
@@ -1611,14 +1620,6 @@ export function VJApp() {
           <WaveformSourceCard
             canvasRef={canvasRef}
             status={status}
-            scenes={SCENES}
-            currentSceneId={currentSceneId}
-            onSceneChange={handleSceneChange}
-            systemAudioSupported={systemAudioSupported}
-            systemAudioValue={SYSTEM_AUDIO_VALUE}
-            selectedDeviceId={selectedDeviceId}
-            devices={devices}
-            onDeviceChange={handleDeviceChange}
             showDebug={showDebug}
             setShowDebug={setShowDebug}
             debugFeatures={debugFeatures}
@@ -1656,9 +1657,6 @@ export function VJApp() {
             onKleinAlphaChange={setAiKleinAlpha}
             aiKleinSteps={aiKleinSteps}
             onKleinStepsChange={setAiKleinSteps}
-            aiCaptureSize={aiCaptureSize}
-            onCaptureSizeChange={setAiCaptureSize}
-            aiOutputLong={aiOutputLong}
             aiStageSharpen={aiStageSharpen}
             aiStagePixelate={aiStagePixelate}
             aiStagePixelateSize={aiStagePixelateSize}

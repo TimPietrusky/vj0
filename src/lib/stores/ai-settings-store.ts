@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 export type AiBackend = "klein" | "sdturbo" | "zimage";
 
 export const AI_BACKEND_URLS: Record<AiBackend, string> = {
-  klein: "https://lrlvdh3j31k14t-3000.proxy.runpod.net/webrtc/offer",
+  klein: "https://sje35edd58abpo-3000.proxy.runpod.net/webrtc/offer",
   sdturbo: "https://3746utbd1i3x73-3000.proxy.runpod.net/webrtc/offer",
   zimage: "https://astt1jyau6hsaq-3000.proxy.runpod.net/webrtc/offer",
 };

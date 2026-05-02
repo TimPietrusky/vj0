@@ -27,25 +27,34 @@ export class VisualEngine {
   // Pre-allocated buffer for time-domain data (reused every frame)
   private timeDomainBuffer: Float32Array;
 
-  // Internal canvas resolution
-  private width = 1024;
-  private height = 256;
+  // Internal canvas resolution — driven by the AI output dimensions so the
+  // pixel buffer matches what gets captured and sent. No hidden crop or
+  // stretch: what you see on the input canvas is exactly what the AI sees.
+  private width: number;
+  private height: number;
 
   constructor(
     canvas: HTMLCanvasElement,
     audioEngine: AudioEngine,
-    scenes: VjScene[]
+    scenes: VjScene[],
+    /** Initial canvas resolution. Pass the AI output width/height so the
+     *  waveform renders at the same dimensions the AI will generate at. */
+    initialWidth = 512,
+    initialHeight = 288,
   ) {
     if (scenes.length === 0) {
       throw new Error('VisualEngine requires at least one scene');
     }
+
+    this.width = initialWidth;
+    this.height = initialHeight;
 
     this.canvas = canvas;
     this.audioEngine = audioEngine;
     this.scenes = scenes;
     this.currentScene = scenes[0];
 
-    // Set canvas resolution
+    // Set canvas resolution to match the supplied dimensions
     this.canvas.width = this.width;
     this.canvas.height = this.height;
 

@@ -34,6 +34,14 @@ on:
         required: false
         type: string
         default: ''
+      cu_tag:
+        description: 'CUDA toolkit variant: cu128 (default, broadest compat) or cu130 (12% faster on driver ≥ 570)'
+        required: false
+        type: choice
+        options:
+          - cu128
+          - cu130
+        default: cu128
 
 jobs:
   build-and-push:
@@ -82,5 +90,7 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            CU_TAG=${{ inputs.cu_tag || 'cu128' }}
           # Blacksmith caches BuildKit layers per repo automatically; no need
           # for explicit cache-from/cache-to like GitHub-hosted runners need.

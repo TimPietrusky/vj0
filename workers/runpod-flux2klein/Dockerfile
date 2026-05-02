@@ -3,16 +3,20 @@
 # Base: nvidia/cuda:12.8.1-runtime-ubuntu24.04 (slim — torch wheels are
 # prebuilt, no compilation needed at build time).
 #
-# Pinned to torch==2.11.0+cu128 because RunPod 5090 hosts in EU-RO-1 still
-# ship driver 570; cu130 wheels would refuse to start there. See
-# BENCH-2026-04-30.md "Pod / RunPod gotchas" for the trip wires.
+# Default: torch 2.11.0+cu128 — broadest Blackwell compat (driver ≥ 555).
+# cu130 is 12% faster at 512×288 on driver ≥ 570 (bench 2026-05-02) and
+# works on all current RunPod 5090 / PRO 6000 Blackwell hosts (driver 580).
+#
+# To build with the faster cu130 variant:
+#   docker build --build-arg CU_TAG=cu130 -t vj0-flux2klein-worker:cu130 .
 #
 # What lives inside the image:
 #   /app/server.js              — WebRTC dispatcher (Node 20)
 #   /app/inference_server.py    — Python worker (one process per GPU)
 #   /app/node_modules/          — express + @roamhq/wrtc
-#   /usr/local/lib/python3.12/  — torch 2.11+cu128, diffusers (pinned commit),
-#                                 transformers, accelerate, torchao, …
+#   /usr/local/lib/python3.12/  — torch 2.11+cu130 (or cu128), diffusers
+#                                 (pinned commit), transformers, accelerate,
+#                                 torchao, …
 #
 # What stays on /workspace (network volume, mounted at runtime):
 #   /workspace/hf-cache/                    — Klein 4B + small decoder (~23 GB)
@@ -59,21 +63,24 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ── PyTorch (Blackwell sm_120 needs cu128) ────────────────
-# Install order matters: torch + torchvision FIRST from cu128 index, then
-# everything else can resolve against the already-installed torch (no
-# accidental cu130 pull-in from a transitive dep).
+# ── PyTorch ───────────────────────────────────────────────
+# Default cu128 — works on all Blackwell sm_120 hosts (driver ≥ 555).
+# Override at build time:  docker build --build-arg CU_TAG=cu130 …
+# Install order matters: torch + torchvision FIRST from the chosen index,
+# then everything else resolves against the already-installed torch (no
+# accidental pull-in of the wrong CUDA variant from a transitive dep).
+ARG CU_TAG=cu128
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --break-system-packages --no-cache-dir \
         torch==2.11.0 torchvision \
-        --extra-index-url https://download.pytorch.org/whl/cu128
+        --extra-index-url https://download.pytorch.org/whl/${CU_TAG}
 
 # ── Application Python deps ───────────────────────────────
 COPY requirements.txt /tmp/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt && \
     pip3 install --break-system-packages --no-cache-dir \
-        torchao --extra-index-url https://download.pytorch.org/whl/cu128 && \
+        torchao --extra-index-url https://download.pytorch.org/whl/${CU_TAG} && \
     rm /tmp/requirements.txt
 
 # ── Sanity check at build time ────────────────────────────

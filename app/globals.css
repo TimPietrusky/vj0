@@ -135,6 +135,12 @@ body::before {
   letter-spacing: 0.04em;
 }
 
+/* Popover variant — slightly larger for better finger/mouse targeting */
+.vj-input--popover {
+  padding: 0.4rem 0.625rem;
+  font-size: 0.75rem;
+}
+
 /* Small button base */
 .vj-btn {
   display: inline-flex;

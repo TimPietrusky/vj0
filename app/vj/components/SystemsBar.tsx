@@ -1,6 +1,8 @@
 "use client";
 
+import React, { useState, useRef, useEffect } from "react";
 import type { AiTransportStatus } from "@/src/lib/ai/transport";
+import type { VjScene } from "@/src/lib/scenes/types";
 import {
   AI_BACKEND_LABELS,
   AI_BACKEND_URLS,
@@ -12,24 +14,48 @@ import { RecordingControl } from "./RecordingControl";
 
 type Status = "idle" | "requesting" | "running" | "error";
 type DmxStatus = "disconnected" | "connecting" | "connected" | "unsupported";
+type Tone = "live" | "info" | "error" | "warn" | "muted";
+type ActivePopover = "audio" | "ai" | null;
+
+interface AudioDevice {
+  deviceId: string;
+  label: string;
+}
 
 interface SystemsBarProps {
+  // ── Audio ─────────────────────────────────────────────────────
   audioStatus: Status;
   audioDeviceLabel?: string;
+  /** Available audio input devices for the pop-over device picker. */
+  devices: AudioDevice[];
+  /** Currently selected device ID ("" = default, systemAudioValue = system). */
+  selectedDeviceId: string;
+  onDeviceChange: (deviceId: string) => void;
+  /** Whether getDisplayMedia is available in this browser. */
+  systemAudioSupported: boolean;
+  /** Sentinel value for the "System audio" dropdown entry. */
+  systemAudioValue: string;
+
+  // ── Scene ─────────────────────────────────────────────────────
+  scenes: readonly VjScene[];
+  currentSceneId: string;
+  onSceneChange: (sceneId: string) => void;
+
+  // ── AI ────────────────────────────────────────────────────────
   aiStatus: AiTransportStatus;
   aiBackend: AiBackend;
   /** Switch backend (also closes any open WebRTC channel — caller's job). */
   onBackendChange: (b: AiBackend) => void;
   aiAutoConnect: boolean;
   onAutoConnectChange: (v: boolean) => void;
-  /** Open the WebRTC channel. Bound to the connect button. */
+  /** Open the WebRTC channel. */
   onConnect: () => void;
-  /** Close the WebRTC channel. Bound to the disconnect button. */
+  /** Close the WebRTC channel. */
   onDisconnect: () => void;
   aiGenTimeMs: number | null;
-  /** Per-stage timing breakdown from inference_server.py. When present,
-   *  hover the AI block to see vae/transformer/jpeg ms split — useful for
-   *  spotting the next bottleneck without re-instrumenting the worker. */
+  /** Actual received frames per second — real canvas output rate. */
+  aiRecvFps: number | null;
+  /** Per-stage timing breakdown from inference_server.py. */
   aiTiming?: {
     decode_in_ms?: number;
     prompt_ms?: number;
@@ -38,21 +64,19 @@ interface SystemsBarProps {
     jpeg_ms?: number;
     total_ms?: number;
   } | null;
+
+  // ── DMX ───────────────────────────────────────────────────────
   dmxStatus: DmxStatus;
   dmxFixtureCount: number;
   dmxActiveCount: number;
   /** Master DMX/lighting switch — when false the DMX block goes muted "off". */
   lightingEnabled: boolean;
-  /** Whether the DMX console drawer is currently open. Drives the chevron
-   *  rotation and the magenta accent state on the chip. */
+  /** Whether the DMX console drawer is currently open. */
   dmxOpen: boolean;
   /** Toggle the DMX console drawer open/closed. */
   onToggleDmx: () => void;
 
-  // ── Recording — session-output controls ─────────────────────────────
-  // Promoted out of the AI Console card so it sits next to the other
-  // global session actions (Stage ↗). The card itself is a per-cue
-  // surface; capturing the whole session belongs at the bar level.
+  // ── Recording ─────────────────────────────────────────────────
   isRecording: boolean;
   isFinalizingRecording: boolean;
   recordingSupported: boolean;
@@ -64,12 +88,25 @@ interface SystemsBarProps {
 }
 
 /**
- * Single horizontal systems bar — reads top-to-bottom in 0.5s.
- * [AUDIO] [VISUAL] [AI] [DMX] on the left, live-mode toggles on the right.
+ * Minimal systems bar — icon-driven top bar with pop-over menus.
+ *
+ * Surface shows only: logo, 3 icon buttons (Audio / AI / DMX), a compact
+ * recording indicator when active, the live FPS counter, and a Stage link.
+ * Everything else (device selection, scene, backend, latency breakdown,
+ * recording controls) lives in the pop-overs — one click away but never
+ * cluttering the bar during a live set.
  */
 export function SystemsBar({
   audioStatus,
   audioDeviceLabel,
+  devices,
+  selectedDeviceId,
+  onDeviceChange,
+  systemAudioSupported,
+  systemAudioValue,
+  scenes,
+  currentSceneId,
+  onSceneChange,
   aiStatus,
   aiBackend,
   onBackendChange,
@@ -77,11 +114,9 @@ export function SystemsBar({
   onAutoConnectChange,
   onConnect,
   onDisconnect,
-  aiGenTimeMs,
+  aiRecvFps,
   aiTiming,
   dmxStatus,
-  dmxFixtureCount,
-  dmxActiveCount,
   lightingEnabled,
   dmxOpen,
   onToggleDmx,
@@ -94,13 +129,22 @@ export function SystemsBar({
   recordingResolution,
   onRecordingResolutionChange,
 }: SystemsBarProps) {
-  const audioTone = audioStatus === "error"
-    ? "error"
-    : audioStatus === "running"
-    ? "live"
-    : audioStatus === "requesting"
-    ? "info"
-    : "info";
+  const [activePopover, setActivePopover] = useState<ActivePopover>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
+
+  const togglePopover = (which: ActivePopover) => {
+    setActivePopover((prev) => (prev === which ? null : which));
+  };
+
+  // ── Tones ─────────────────────────────────────────────────────
+  const audioTone: Tone =
+    audioStatus === "error"
+      ? "error"
+      : audioStatus === "running"
+      ? "live"
+      : audioStatus === "requesting"
+      ? "info"
+      : "info";
 
   const aiTone: Tone =
     aiStatus === "connected"
@@ -121,258 +165,346 @@ export function SystemsBar({
     ? "info"
     : "info";
 
+  // ── Outside click + Escape closes pop-over ────────────────────
+  useEffect(() => {
+    if (!activePopover) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        controlsRef.current &&
+        !controlsRef.current.contains(e.target as Node)
+      ) {
+        setActivePopover(null);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setActivePopover(null);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [activePopover]);
+
   return (
     <header className="sticky top-0 z-30 w-full border-b border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel)]/95 backdrop-blur-sm">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1 font-mono text-[10px] uppercase tracking-wider">
-        <BrandSigil />
+      <div className="flex items-center gap-4 px-4 py-2">
+        {/* ── Left: Logo + Icon Buttons + Pop-overs ─────────────── */}
+        <div className="relative flex items-center gap-3" ref={controlsRef}>
+          <BrandSigil />
 
-        <SysBlock
-          label="Audio"
-          tone={audioTone}
-          value={
-            audioStatus === "running"
-              ? audioDeviceLabel
-                ? trimLabel(audioDeviceLabel)
-                : "live"
-              : audioStatus === "requesting"
-              ? "starting…"
-              : audioStatus === "error"
-              ? "error"
-              : "idle"
-          }
-        />
-
-        {/* AI block — status pill + backend dropdown + auto + connect.
-            Promoted from the AI Console card header so the most-touched
-            session controls live next to their status indicator. */}
-        <div className="flex items-center gap-2">
-          <SysBlock
-            label="AI"
-            tone={aiTone}
-            value={formatAi(aiStatus, aiGenTimeMs)}
-            title={
-              aiTiming
-                ? `${AI_BACKEND_LABELS[aiBackend]}\n` +
-                  `vae enc: ${(aiTiming.vae_encode_ms ?? 0).toFixed(1)} ms\n` +
-                  `transformer+vae dec: ${(aiTiming.transformer_plus_decode_ms ?? 0).toFixed(1)} ms\n` +
-                  `jpeg: ${(aiTiming.jpeg_ms ?? 0).toFixed(1)} ms\n` +
-                  `decode in: ${(aiTiming.decode_in_ms ?? 0).toFixed(1)} ms\n` +
-                  `prompt: ${(aiTiming.prompt_ms ?? 0).toFixed(1)} ms\n` +
-                  `total: ${(aiTiming.total_ms ?? 0).toFixed(1)} ms`
-                : AI_BACKEND_LABELS[aiBackend]
-            }
-          />
-          <select
-            value={aiBackend}
-            onChange={(e) => onBackendChange(e.target.value as AiBackend)}
-            className="vj-input vj-input--bar"
-            title={`Backend · ${AI_BACKEND_LABELS[aiBackend]}`}
-          >
-            {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map((k) => (
-              <option key={k} value={k}>
-                {AI_BACKEND_LABELS[k]}
-              </option>
-            ))}
-          </select>
-          <label
-            className="flex items-center gap-1 normal-case tracking-normal text-[color:var(--vj-ink-dim)]"
-            title="Auto-connect on page load and on backend switch"
-          >
-            <input
-              type="checkbox"
-              checked={aiAutoConnect}
-              onChange={(e) => onAutoConnectChange(e.target.checked)}
-              className="vj-check"
+          {/* Text buttons with status dots */}
+          <div className="flex items-center gap-1">
+            <TextButton
+              label="audio"
+              tone={audioTone}
+              active={activePopover === "audio"}
+              onClick={() => togglePopover("audio")}
             />
-            auto
-          </label>
-          {aiStatus === "connected" || aiStatus === "connecting" ? (
-            <button
-              onClick={onDisconnect}
-              className="vj-btn vj-btn--danger vj-btn--bar"
-              title="Close the WebRTC channel"
-            >
-              ✕ disc.
-            </button>
-          ) : (
-            <button
-              onClick={onConnect}
-              className="vj-btn vj-btn--live vj-btn--bar"
-              title="Open WebRTC channel to the AI backend"
-            >
-              ▶ connect
-            </button>
+            <TextButton
+              label="ai"
+              tone={aiTone}
+              active={activePopover === "ai"}
+              onClick={() => togglePopover("ai")}
+            />
+            <TextButton
+              label="show control"
+              tone={dmxTone}
+              active={dmxOpen}
+              onClick={onToggleDmx}
+            />
+          </div>
+
+          {/* Recording indicator — compact stop in the bar when active,
+              so stopping mid-set never requires opening a menu. */}
+          {isRecording && (
+            <RecordingControl
+              isRecording
+              isSupported
+              getElapsedMs={getRecordingElapsedMs}
+              onStart={onStartRecording}
+              onStop={onStopRecording}
+              isFinalizing={isFinalizingRecording}
+              compact
+            />
+          )}
+
+          {/* ── Pop-over panel ────────────────────────────────────── */}
+          {activePopover && (
+            <div className="absolute left-0 top-full mt-2 w-72 rounded-lg border border-[color:var(--vj-edge-hot)] bg-[color:var(--vj-panel)] shadow-[0_18px_48px_-12px_rgba(0,0,0,0.7)] z-50">
+              <div className="space-y-3 p-4 font-mono text-[11px] uppercase tracking-wider">
+                {activePopover === "audio" ? (
+                  <>
+                    {/* ── Audio status ─────────────────────────── */}
+                    <PopoverSection title="Audio">
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="vj-dot"
+                            style={{ color: toneColor(audioTone) }}
+                          />
+                          <span className="text-[color:var(--vj-ink)]">
+                            {audioStatus === "running"
+                              ? "Active"
+                              : audioStatus === "requesting"
+                              ? "Starting…"
+                              : audioStatus === "error"
+                              ? "Error"
+                              : "Idle"}
+                          </span>
+                        </div>
+
+                        {audioDeviceLabel && (
+                          <div className="text-[10px] text-[color:var(--vj-ink-dim)] normal-case">
+                            {audioDeviceLabel}
+                          </div>
+                        )}
+                      </div>
+                    </PopoverSection>
+
+                    {/* ── Device selection ─────────────────────── */}
+                    <PopoverSection title="Device">
+                      <select
+                        value={selectedDeviceId}
+                        onChange={(e) => onDeviceChange(e.target.value)}
+                        className="vj-input w-full"
+                      >
+                        {systemAudioSupported && (
+                          <option value={systemAudioValue}>
+                            System audio (share screen/tab)
+                          </option>
+                        )}
+                        <option value="">Default device</option>
+                        {devices.map((d) => (
+                          <option key={d.deviceId} value={d.deviceId}>
+                            {d.label}
+                          </option>
+                        ))}
+                      </select>
+                    </PopoverSection>
+
+                    {/* ── Scene selection ──────────────────────── */}
+                    <PopoverSection title="Scene">
+                      <select
+                        value={currentSceneId}
+                        onChange={(e) => onSceneChange(e.target.value)}
+                        className="vj-input w-full"
+                      >
+                        {scenes.map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name}
+                          </option>
+                        ))}
+                      </select>
+                    </PopoverSection>
+                  </>
+                ) : (
+                  <>
+                    {/* ── AI Backend ───────────────────────────── */}
+                    <PopoverSection title="AI Backend">
+                      <div className="space-y-2">
+                        <select
+                          value={aiBackend}
+                          onChange={(e) =>
+                            onBackendChange(e.target.value as AiBackend)
+                          }
+                          className="vj-input w-full"
+                        >
+                          {(Object.keys(AI_BACKEND_URLS) as AiBackend[]).map(
+                            (k) => (
+                              <option key={k} value={k}>
+                                {AI_BACKEND_LABELS[k]}
+                              </option>
+                            )
+                          )}
+                        </select>
+
+                        <label className="flex items-center gap-2 text-[color:var(--vj-ink-dim)]">
+                          <input
+                            type="checkbox"
+                            checked={aiAutoConnect}
+                            onChange={(e) =>
+                              onAutoConnectChange(e.target.checked)
+                            }
+                            className="vj-check"
+                          />
+                          <span>Auto-connect</span>
+                        </label>
+
+                        {aiStatus === "connected" ||
+                        aiStatus === "connecting" ? (
+                          <button
+                            onClick={onDisconnect}
+                            className="vj-btn vj-btn--danger w-full"
+                          >
+                            Disconnect
+                          </button>
+                        ) : (
+                          <button
+                            onClick={onConnect}
+                            className="vj-btn vj-btn--live w-full"
+                          >
+                            Connect
+                          </button>
+                        )}
+                      </div>
+                    </PopoverSection>
+
+                    {/* ── Latency breakdown ────────────────────── */}
+                    {aiTiming && (
+                      <PopoverSection title="Latency">
+                        <div className="space-y-1 text-[10px] text-[color:var(--vj-info)] normal-case">
+                          <div>
+                            VAE encode:{" "}
+                            {(aiTiming.vae_encode_ms ?? 0).toFixed(1)} ms
+                          </div>
+                          <div>
+                            Transformer + decode:{" "}
+                            {(
+                              aiTiming.transformer_plus_decode_ms ?? 0
+                            ).toFixed(1)}{" "}
+                            ms
+                          </div>
+                          <div>
+                            JPEG: {(aiTiming.jpeg_ms ?? 0).toFixed(1)} ms
+                          </div>
+                          <div>
+                            Prompt: {(aiTiming.prompt_ms ?? 0).toFixed(1)} ms
+                          </div>
+                          <div className="font-bold text-[color:var(--vj-ink)]">
+                            Total: {(aiTiming.total_ms ?? 0).toFixed(1)} ms
+                          </div>
+                        </div>
+                      </PopoverSection>
+                    )}
+
+                    {/* ── Recording ────────────────────────────── */}
+                    <PopoverSection title="Recording">
+                      <div className="space-y-2">
+                        <select
+                          value={recordingResolution}
+                          onChange={(e) =>
+                            onRecordingResolutionChange(
+                              e.target.value as RecordingResolution
+                            )
+                          }
+                          disabled={isRecording || isFinalizingRecording}
+                          className="vj-input w-full"
+                        >
+                          {RECORDING_RESOLUTIONS.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.label}
+                            </option>
+                          ))}
+                        </select>
+
+                        <RecordingControl
+                          isRecording={isRecording}
+                          isSupported={recordingSupported}
+                          getElapsedMs={getRecordingElapsedMs}
+                          onStart={onStartRecording}
+                          onStop={onStopRecording}
+                          isFinalizing={isFinalizingRecording}
+                        />
+                      </div>
+                    </PopoverSection>
+                  </>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
-        {/* DMX chip — clickable surface that toggles the console drawer.
-            When the drawer is open it adopts a magenta accent (matching the
-            drawer's top edge); when fixtures are actively driving DMX the
-            chip pulses softly so the operator catches it peripherally. */}
-        <button
-          type="button"
-          onClick={onToggleDmx}
-          aria-expanded={dmxOpen}
-          aria-controls="vj-dmx-drawer"
-          className={`vj-sys-btn ${
-            lightingEnabled && dmxActiveCount > 0 && !dmxOpen
-              ? "vj-sys-btn--live"
-              : ""
-          }`}
-          title={
-            dmxOpen
-              ? "Close DMX console (Esc)"
-              : `Open DMX console · ${dmxFixtureCount} fixture${
-                  dmxFixtureCount === 1 ? "" : "s"
-                }${dmxActiveCount > 0 ? `, ${dmxActiveCount} active` : ""}`
-          }
-        >
-          <DmxChipBody
-            tone={dmxTone}
-            value={
-              !lightingEnabled
-                ? "off"
-                : dmxStatus === "unsupported"
-                ? "no webusb"
-                : dmxStatus === "connected"
-                ? `${dmxActiveCount}/${dmxFixtureCount}`
-                : dmxStatus
-            }
-          />
-          <svg
-            className="vj-chev"
-            viewBox="0 0 10 10"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-          >
-            <path d="M2 4 L5 7 L8 4" />
-          </svg>
-        </button>
-
-        <div className="ml-auto flex items-center gap-2">
-          {/* Recording — session output. Resolution dropdown locks while a
-              clip is in progress (can't change mid-recording without
-              restarting the encoder). The shortLabel ("1K"/"2K"/"4K")
-              keeps the bar dense; full label is in the option text. */}
-          <select
-            value={recordingResolution}
-            onChange={(e) =>
-              onRecordingResolutionChange(e.target.value as RecordingResolution)
-            }
-            disabled={isRecording || isFinalizingRecording}
-            className="vj-input vj-input--bar"
-            title="Recording output resolution. Source canvas is composited onto a fresh offscreen canvas at this size — letterboxed if AI source aspect doesn't match 16:9."
-          >
-            {RECORDING_RESOLUTIONS.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.shortLabel}
-              </option>
-            ))}
-          </select>
-          <RecordingControl
-            isRecording={isRecording}
-            isSupported={recordingSupported}
-            getElapsedMs={getRecordingElapsedMs}
-            onStart={onStartRecording}
-            onStop={onStopRecording}
-            isFinalizing={isFinalizingRecording}
-            compact
-          />
-
-          <a
-            href="/vj/stage"
-            target="_blank"
-            rel="noreferrer"
-            className="vj-btn vj-btn--bar"
-            title="Open audience-only fullscreen output"
-          >
-            Stage ↗
-          </a>
+        {/* ── Center: FPS metric ──────────────────────────────── */}
+        <div className="flex-1 flex items-center justify-center gap-4 text-[11px] font-mono uppercase tracking-wider text-[color:var(--vj-ink-dim)]">
+          {aiRecvFps != null && (
+            <div className="flex items-center gap-1.5">
+              <span
+                className="vj-dot"
+                style={{ color: "var(--vj-info)" }}
+              />
+              <span>{aiRecvFps.toFixed(0)} fps</span>
+            </div>
+          )}
         </div>
+
+        {/* ── Right: Stage ────────────────────────────────────── */}
+        <a
+          href="/vj/stage"
+          target="_blank"
+          rel="noreferrer"
+          className="vj-btn vj-btn--bar"
+          title="Open audience-only fullscreen output"
+        >
+          Stage
+        </a>
       </div>
     </header>
   );
 }
 
-type Tone = "live" | "info" | "error" | "warn" | "muted";
+/* ═══════════════════════════════════════════════════════════════════
+   Sub-components
+   ═══════════════════════════════════════════════════════════════════ */
 
-function SysBlock({
+function PopoverSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-2 text-[10px] font-bold text-[color:var(--vj-accent)] tracking-[0.15em]">
+        {title}
+      </div>
+      <div className="text-[color:var(--vj-ink)]">{children}</div>
+    </div>
+  );
+}
+
+/** Text button with a status dot — reads as a label you can click. */
+function TextButton({
   label,
   tone,
-  value,
-  title,
+  active = false,
+  onClick,
 }: {
   label: string;
   tone: Tone;
-  value: string;
-  title?: string;
+  active?: boolean;
+  onClick: () => void;
 }) {
   const color = toneColor(tone);
   return (
-    <div className="flex items-center gap-2" title={title ?? `${label}: ${value}`}>
+    <button
+      onClick={onClick}
+      className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px] font-mono uppercase tracking-wider transition-all ${
+        active
+          ? "bg-[color:var(--vj-accent)]/10 ring-1 ring-[color:var(--vj-accent)] text-[color:var(--vj-ink)]"
+          : "text-[color:var(--vj-ink-dim)] hover:bg-[color:var(--vj-edge)] hover:text-[color:var(--vj-ink)]"
+      }`}
+    >
       <span
         className="vj-dot"
         style={{ color }}
-        aria-hidden
       />
-      <span className="text-[color:var(--vj-ink-dim)]">{label}</span>
-      <span
-        className="tabular-nums normal-case tracking-normal"
-        style={{ color }}
-      >
-        {value}
-      </span>
-    </div>
+      <span>{label}</span>
+    </button>
   );
 }
 
-/**
- * Inner status row for the DMX chip — same visual language as SysBlock but
- * stripped of the wrapping div so it can sit inside a <button> without
- * doubling up roles. Tone-coloured dot + label + value, no extra click
- * target (the surrounding .vj-sys-btn is the click surface).
- */
-function DmxChipBody({ tone, value }: { tone: Tone; value: string }) {
-  const color = toneColor(tone);
-  return (
-    <>
-      <span className="vj-dot" style={{ color }} aria-hidden />
-      <span className="text-[color:var(--vj-ink-dim)]">DMX</span>
-      <span
-        className="tabular-nums normal-case tracking-normal"
-        style={{ color }}
-      >
-        {value}
-      </span>
-    </>
-  );
-}
-
+/** vj0 wordmark — text only, no icon. */
 function BrandSigil() {
-  // Tiny branding glyph so the bar doesn't look headless. NOT a headline.
   return (
-    <div
-      className="flex items-center gap-1.5 text-[color:var(--vj-accent)]"
-      aria-hidden
+    <span
+      className="text-[12px] font-bold tracking-[0.22em] text-[color:var(--vj-accent)]"
       title="vj0"
     >
-      <svg width="14" height="14" viewBox="0 0 14 14" className="shrink-0">
-        <path
-          d="M2 2 L7 12 L12 2"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        <circle cx="7" cy="7" r="1.6" fill="currentColor" />
-      </svg>
-      <span className="text-[11px] font-bold tracking-[0.2em]">vj0</span>
-    </div>
+      vj0
+    </span>
   );
 }
 
@@ -389,20 +521,4 @@ function toneColor(tone: Tone): string {
     case "muted":
       return "var(--vj-muted)";
   }
-}
-
-function formatAi(status: AiTransportStatus, genMs: number | null): string {
-  if (status === "connected") {
-    if (genMs && genMs > 0) {
-      const fps = 1000 / genMs;
-      return `connected · ${genMs.toFixed(0)}ms · ${fps.toFixed(0)}fps`;
-    }
-    return "connected";
-  }
-  return status;
-}
-
-function trimLabel(s: string): string {
-  if (s.length <= 28) return s;
-  return s.slice(0, 26) + "…";
 }
