@@ -337,15 +337,18 @@ body::before {
 .vj-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.4rem;
   height: 1.75rem; /* matches vj-btn at default padding — toolbar rows align */
-  padding: 0 0.55rem;
+  padding: 0 0.5rem;
   border: 1px solid var(--vj-edge);
   background: var(--vj-panel-2);
   border-radius: 4px;
   white-space: nowrap;
   transition: border-color 120ms, box-shadow 120ms;
   cursor: default;
+  /* Anchors absolute-positioned children like .vj-chip__alert (the
+     status-LED-style notification badge that flags warn states). */
+  position: relative;
 }
 .vj-chip:hover {
   border-color: var(--vj-edge-hot);
@@ -398,7 +401,9 @@ body::before {
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
   padding: 0;
-  width: 7ch;
+  /* 6ch fits any 6-digit seed (we cap at 1_000_000 — 7 digits — but
+     the upper bound is rarely typed by hand; click ⟲ for full range). */
+  width: 6ch;
   -moz-appearance: textfield;
 }
 .vj-chip__input::-webkit-outer-spin-button,
@@ -419,6 +424,87 @@ body::before {
 }
 .vj-chip__icon:hover {
   color: var(--vj-accent);
+}
+
+/* Warn-tinted chip — the chip's value is in a "needs attention" state
+   (e.g. capture size ≠ output long side, hurting Klein render quality).
+   Border picks up the accent magenta and the label echoes it so the
+   chip pulls peripheral attention without forcing the user to read
+   anything. The remediation action lives as an inline icon inside the
+   chip — same chip owns the problem display + the fix, so the user
+   sees them together instead of hunting for a separate button. */
+.vj-chip--warn {
+  border-color: color-mix(in srgb, var(--vj-accent) 55%, var(--vj-edge-hot));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vj-accent) 14%, transparent);
+}
+.vj-chip--warn .vj-chip__label {
+  color: var(--vj-accent);
+}
+
+/* Alert badge — corner-clamped status LED that flags a "needs attention"
+   state on the chip and offers the fix on click. Absolutely positioned
+   so it has *zero* impact on the chip's natural width: when not warn
+   it's display: none (no DOM cost), when warn it floats over the chip's
+   top-right corner like an instrument-panel indicator clamped to the
+   edge. The bg-colored 2px outer ring punches the badge out from the
+   chip body so it reads as "applied-on" hardware, not flat ink — that's
+   the trick that makes the corner placement feel intentional rather
+   than tacked on. Soft pulse draws peripheral attention without
+   strobing during a live set. */
+.vj-chip__alert {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--vj-accent);
+  /* Sans-serif keeps the ! glyph legible at 8px where the mono font
+     would render it as a fragile thin stroke. */
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  color: #fff;
+  cursor: pointer;
+  z-index: 1;
+  box-shadow:
+    0 0 0 2px var(--vj-bg),
+    0 0 6px color-mix(in srgb, var(--vj-accent) 50%, transparent);
+  animation: vj-chip-alert-pulse 2.4s ease-in-out infinite;
+  transition: transform 80ms;
+}
+.vj-chip--warn .vj-chip__alert {
+  display: inline-flex;
+}
+.vj-chip__alert:hover {
+  background: #fff;
+  color: var(--vj-accent);
+  box-shadow:
+    0 0 0 2px var(--vj-bg),
+    0 0 14px var(--vj-accent);
+  animation: none;
+}
+.vj-chip__alert:active {
+  transform: scale(0.85);
+}
+@keyframes vj-chip-alert-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 2px var(--vj-bg),
+      0 0 3px color-mix(in srgb, var(--vj-accent) 35%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px var(--vj-bg),
+      0 0 12px color-mix(in srgb, var(--vj-accent) 85%, transparent);
+  }
 }
 .vj-chip__range {
   width: 5.5rem;

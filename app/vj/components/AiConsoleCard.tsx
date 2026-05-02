@@ -130,16 +130,30 @@ export function AiConsoleCard({
   aiLogs,
 }: AiConsoleCardProps) {
   const sliderFillPct = Math.round((aiKleinAlpha / 0.5) * 100);
+  // Klein renders sharpest when the client capture size matches the
+  // output long side. When it doesn't, the capture chip telegraphs the
+  // mismatch (border + label go magenta, inline → action appears).
+  // Owning both the bad value and the remediation in one chip keeps
+  // the cause and the fix visually adjacent.
+  const captureMismatch =
+    aiBackendKlein && aiCaptureSize !== aiOutputLong;
 
   return (
     <div className="vj-panel p-2 flex flex-col gap-2">
-      {/* Body splits into a hero preview (left, 2/3) and an options
-          column (right, 1/3) at lg+. Below lg, falls back to a stacked
-          single column so the preview still leads. The split lets
-          mid-set actions (generate, ResPicker, α / steps, prompt) sit
-          inline with the preview instead of pushing it up the screen
-          and forcing eyes to ping-pong between canvas and controls. */}
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-3 items-start">
+      {/* Body splits into a hero preview (left, ~62%) and an options
+          column (right, ~38%) at lg+. Below lg, falls back to a
+          stacked single column so the preview still leads. The split
+          lets mid-set actions (generate, ResPicker, α / steps, prompt)
+          sit inline with the preview instead of pushing it up the
+          screen and forcing eyes to ping-pong between canvas and
+          controls. The 1.6fr/1fr ratio (vs. an even tighter 2fr/1fr)
+          buys the options column ~70px more horizontal real estate at
+          1920w — enough for the four params chips (capture · fps ·
+          seed · upscale) to sit on one line instead of orphaning
+          upscale onto its own row. The preview is still huge — 16:9
+          aspect drives height and at 1920w the canvas lands at ~870px,
+          which is more than enough hero presence. */}
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)] gap-3 items-start">
         {/* Preview — hero. WebGL StageRenderer applies the same sharpen
             pass that runs on /vj/stage so what you see here is what the
             projector sees. The frame is locked to 16:9 regardless of
@@ -241,16 +255,19 @@ export function AiConsoleCard({
           )}
         </div>
 
-        {/* Options column — live toolbar, prompt, set-and-forget
-            params, diagnostics. min-w-0 lets the column actually shrink
-            when long preset chips would otherwise stretch the grid. */}
+        {/* Options column — two persistent toolbar rows (live cues +
+            params), the prompt, then the diagnostics disclosure. Both
+            toolbar rows share the same .vj-chip language so the visual
+            hierarchy comes from row order (actions on top, settings
+            below), not from heavier framing. min-w-0 lets the column
+            actually shrink when long preset chips would otherwise
+            stretch the grid. */}
         <div className="flex flex-col gap-2 min-w-0">
-          {/* Live toolbar — generate + per-cue controls. Single row of
-              equal-height chips (.vj-chip == .vj-btn height). The α
-              slider, steps select, ResPicker, and match button all
-              share the same border weight so the eye doesn't jump
-              between visual hierarchies the way it did with the old
-              bordered "groups" around each control. */}
+          {/* Row 1 — Live cues. Generate is the action so it leads in
+              magenta accent; the per-cue chips (resolution, klein α /
+              steps, match-to-output) follow in the neutral chip style.
+              Wraps if the column gets too narrow; otherwise sits on
+              one line. */}
           <div className="flex items-center gap-1.5 flex-wrap">
             <button
               type="button"
@@ -311,107 +328,116 @@ export function AiConsoleCard({
                 </select>
               </label>
             )}
-            {aiBackendKlein && aiCaptureSize !== aiOutputLong && (
-              <button
-                onClick={() => onCaptureSizeChange(aiOutputLong)}
-                className="vj-btn vj-btn--accent"
-                title={`Match capture to output long side (${aiOutputLong}) for sharper Klein output`}
+            {/* Note: when capture ≠ output long side, the remediation
+                lives inline on the capture chip below (Row 2) — same
+                component owns the broken state + the fix, so they
+                stay together instead of orphaning a separate button. */}
+          </div>
+
+          {/* Row 2 — Generation params. Permanent, not collapsed: the
+              chip language already collapses each one to ~80–130 px so
+              the four fit on a single row in the available column,
+              and these values (capture/fps/seed/upscale) are useful
+              enough to verify at a glance that they don't deserve to
+              hide behind a disclosure. Visual hierarchy vs Row 1 comes
+              from order + Row 1's magenta accent button, not framing. */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <label
+              className={`vj-chip${captureMismatch ? " vj-chip--warn" : ""}`}
+              title={
+                captureMismatch
+                  ? `Capture ${aiCaptureSize} ≠ output long side ${aiOutputLong}. Klein renders sharpest when they match — click → to update.`
+                  : aiBackendKlein
+                    ? "Client capture resolution — matched to output long side for sharpest Klein output."
+                    : "Client capture resolution"
+              }
+            >
+              <span className="vj-chip__label">capture</span>
+              <select
+                value={aiCaptureSize}
+                onChange={(e) => onCaptureSizeChange(Number(e.target.value))}
+                className="vj-chip__select"
               >
-                match → {aiOutputLong}
+                <option value={64}>64</option>
+                <option value={128}>128</option>
+                <option value={256}>256</option>
+                <option value={512}>512</option>
+              </select>
+              {/* Corner badge — only rendered when warn is active. It's
+                  absolute-positioned so it doesn't reserve any layout
+                  slot when missing (chip width stays constant without
+                  hidden placeholder space). */}
+              {captureMismatch && (
+                <button
+                  type="button"
+                  onClick={() => onCaptureSizeChange(aiOutputLong)}
+                  className="vj-chip__alert"
+                  title={`Capture ${aiCaptureSize} ≠ output long side ${aiOutputLong} — click to match for sharper Klein output`}
+                  aria-label={`Match capture to output long side ${aiOutputLong}`}
+                >
+                  !
+                </button>
+              )}
+            </label>
+            <label className="vj-chip" title="Target frame rate">
+              <span className="vj-chip__label">fps</span>
+              <select
+                value={aiFrameRate}
+                onChange={(e) => onFrameRateChange(Number(e.target.value))}
+                className="vj-chip__select"
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={30}>30</option>
+                <option value={60}>60</option>
+              </select>
+            </label>
+            <label className="vj-chip" title="Generation seed">
+              <span className="vj-chip__label">seed</span>
+              <input
+                type="number"
+                value={aiSeed}
+                onChange={(e) =>
+                  onSeedChange(Math.max(0, Math.floor(Number(e.target.value))))
+                }
+                className="vj-chip__input"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  onSeedChange(Math.floor(Math.random() * 1_000_000))
+                }
+                className="vj-chip__icon"
+                title="Randomize seed"
+                aria-label="Randomize seed"
+              >
+                ⟲
               </button>
-            )}
+            </label>
+            <label
+              className="vj-chip"
+              title="Interpolation when the AI output is scaled up for display"
+            >
+              <span className="vj-chip__label">upscale</span>
+              <select
+                value={aiUpscaleMode}
+                onChange={(e) =>
+                  onUpscaleModeChange(e.target.value as UpscaleMode)
+                }
+                className="vj-chip__select"
+              >
+                <option value="lanczos">lanczos</option>
+                <option value="bilinear">bilinear</option>
+              </select>
+            </label>
           </div>
 
           <PromptDock activePrompt={aiPrompt} onSetPrompt={onPromptChange} />
 
-          {/* Generation params — set-and-forget. Summary line shows
-              the current config so you can verify without expanding.
-              Inside, controls are inline chips (not a 2×2 grid of
-              full-width selects) so a short value like "60" doesn't
-              get stranded inside a 200px-wide select. */}
-          <details className="vj-disclosure">
-            <summary>
-              params · seed {aiSeed} · {aiCaptureSize}→{aiOutputWidth}×
-              {aiOutputHeight} · {aiFrameRate}fps · {aiUpscaleMode}
-            </summary>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              <label
-                className="vj-chip"
-                title={
-                  aiBackendKlein
-                    ? "Client capture resolution. Klein: match to output long side for best quality."
-                    : "Client capture resolution"
-                }
-              >
-                <span className="vj-chip__label">capture</span>
-                <select
-                  value={aiCaptureSize}
-                  onChange={(e) => onCaptureSizeChange(Number(e.target.value))}
-                  className="vj-chip__select"
-                >
-                  <option value={64}>64</option>
-                  <option value={128}>128</option>
-                  <option value={256}>256</option>
-                  <option value={512}>512</option>
-                </select>
-              </label>
-              <label className="vj-chip" title="Target frame rate">
-                <span className="vj-chip__label">fps</span>
-                <select
-                  value={aiFrameRate}
-                  onChange={(e) => onFrameRateChange(Number(e.target.value))}
-                  className="vj-chip__select"
-                >
-                  <option value={10}>10</option>
-                  <option value={20}>20</option>
-                  <option value={30}>30</option>
-                  <option value={60}>60</option>
-                </select>
-              </label>
-              <label className="vj-chip" title="Generation seed">
-                <span className="vj-chip__label">seed</span>
-                <input
-                  type="number"
-                  value={aiSeed}
-                  onChange={(e) =>
-                    onSeedChange(
-                      Math.max(0, Math.floor(Number(e.target.value)))
-                    )
-                  }
-                  className="vj-chip__input"
-                />
-                <button
-                  type="button"
-                  onClick={() =>
-                    onSeedChange(Math.floor(Math.random() * 1_000_000))
-                  }
-                  className="vj-chip__icon"
-                  title="Randomize seed"
-                  aria-label="Randomize seed"
-                >
-                  ⟲
-                </button>
-              </label>
-              <label
-                className="vj-chip"
-                title="Interpolation when the AI output is scaled up for display"
-              >
-                <span className="vj-chip__label">upscale</span>
-                <select
-                  value={aiUpscaleMode}
-                  onChange={(e) =>
-                    onUpscaleModeChange(e.target.value as UpscaleMode)
-                  }
-                  className="vj-chip__select"
-                >
-                  <option value="lanczos">lanczos</option>
-                  <option value="bilinear">bilinear</option>
-                </select>
-              </label>
-            </div>
-          </details>
-
-          {/* Diagnostics — capture preview + log feed. */}
+          {/* Diagnostics — capture preview + log feed. Stays collapsed:
+              the log list and 160-px debug canvas are bulky and only
+              wanted while debugging. Unlike params (4 inline chips),
+              there's no compact representation that fits in a single row. */}
           <details className="vj-disclosure">
             <summary>
               diagnostics ({aiLogs.length} log{aiLogs.length === 1 ? "" : "s"})
