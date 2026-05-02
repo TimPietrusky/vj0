@@ -228,6 +228,9 @@ function handleWorkerLine(w, line) {
         width: msg.width,
         height: msg.height,
         worker: w.gpu,
+        // Per-stage breakdown from inference_server.py — lets the UI show
+        // where the latency budget is going (vae encode vs transformer vs jpeg).
+        timing: msg.timing,
       }));
     }
     return;
@@ -256,17 +259,38 @@ function flushPendingForWorker(w) {
   for (const r of buf) sendToInference(r);
 }
 
+// Per-worker dispatch limit. Worker's internal request_queue is maxsize=2,
+// so anything past 2 in flight gets silently dropped at the worker. Setting
+// the dispatcher cap to 3 (one in flight + two queued) gives the worker
+// just enough lookahead without wasting IPC bandwidth on frames that would
+// be dropped anyway. Past this, dispatchFrame() rejects at the source.
+const MAX_PENDING_PER_WORKER = 3;
+let droppedInbound = 0;
+
+// Load-aware "next worker" selector. Strict round-robin starves the dispatcher
+// when one worker is briefly slower (recompile, GPU contention) — the slow
+// worker's stdin queue grows while the other sits idle. Picking the worker
+// with the FEWEST pending frames is robust to those transients. Tie-break
+// preserves round-robin so equal-load workers still alternate predictably.
 function nextReadyWorker() {
   if (workers.length === 0) return null;
-  const start = roundRobinIdx;
+  let best = null;
+  let bestIdx = -1;
   for (let i = 0; i < workers.length; i++) {
-    const w = workers[(start + i) % workers.length];
-    if (w.ready) {
-      roundRobinIdx = (start + i + 1) % workers.length;
-      return w;
+    const idx = (roundRobinIdx + i) % workers.length;
+    const w = workers[idx];
+    if (!w.ready) continue;
+    if (best === null || w.framePending < best.framePending) {
+      best = w;
+      bestIdx = idx;
     }
   }
-  return null;
+  if (best !== null) {
+    // Advance the round-robin head past the winner so equal-load ties
+    // alternate next time we're called.
+    roundRobinIdx = (bestIdx + 1) % workers.length;
+  }
+  return best;
 }
 
 function broadcastState(stateOnly) {
@@ -286,6 +310,16 @@ function broadcastState(stateOnly) {
 function dispatchFrame(frameMsg) {
   const w = nextReadyWorker();
   if (!w) return false;
+  // Drop early if the chosen worker is already at saturation. Worker's
+  // request_queue (maxsize=2) would silently drop this anyway — better to
+  // skip the JSON encode + stdin round-trip + bytes over the pipe.
+  if (w.framePending >= MAX_PENDING_PER_WORKER) {
+    droppedInbound++;
+    if (droppedInbound % 10 === 1) {
+      console.log(`[dispatch] dropped frame (worker ${w.gpu} saturated, pending=${w.framePending}, total dropped=${droppedInbound})`);
+    }
+    return false;
+  }
   try {
     const ok = w.proc.stdin.write(JSON.stringify(frameMsg) + "\n");
     w.framePending++;

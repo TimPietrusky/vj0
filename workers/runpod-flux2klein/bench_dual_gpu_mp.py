@@ -88,6 +88,56 @@ def worker_main(gpu_idx: int, ctrl_in, data_out):
         # In this process, the only visible device is at index 0.
         device = "cuda:0"
 
+        # Optional: monkey-patch torch SDPA → SageAttention.
+        #   BENCH_USE_SAGE=1 (default off) — turn the patch on.
+        #   BENCH_SAGE_VERSION=1 — pip `sageattention` (v1, int8 Q/K, bf16 PV).
+        #   BENCH_SAGE_VERSION=3 — `sageattn3_blackwell` from source, FP4
+        #     microscaling attention specifically tuned for sm_120. README
+        #     claims 2.7x vs FA2 on RTX5090.
+        #
+        # Sage2 documented torch.compile compat for non-cudagraphs mode only;
+        # Sage3 makes no claim. So we A/B against both compile_mode=default
+        # AND compile_mode=reduce-overhead; the latter may regress more.
+        sage_v = os.environ.get("BENCH_SAGE_VERSION", "1")
+        if os.environ.get("BENCH_USE_SAGE", "0") == "1":
+            _orig_sdpa = torch.nn.functional.scaled_dot_product_attention
+            try:
+                if sage_v == "3":
+                    from sageattn3 import sageattn3_blackwell as _sage_kernel
+
+                    def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0,
+                                   is_causal=False, scale=None, enable_gqa=False):
+                        # Sage3 API: sageattn3_blackwell(q, k, v, is_causal=False).
+                        # No scale, no mask, no dropout, no GQA — fall back for those.
+                        if attn_mask is not None or dropout_p != 0.0 or enable_gqa or scale is not None:
+                            return _orig_sdpa(
+                                query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
+                                is_causal=is_causal, scale=scale, enable_gqa=enable_gqa,
+                            )
+                        try:
+                            return _sage_kernel(query, key, value, is_causal=is_causal)
+                        except Exception:
+                            return _orig_sdpa(query, key, value, is_causal=is_causal)
+                else:
+                    import sageattention as _sa
+
+                    def _sage_sdpa(query, key, value, attn_mask=None, dropout_p=0.0,
+                                   is_causal=False, scale=None, enable_gqa=False):
+                        if attn_mask is not None or dropout_p != 0.0 or enable_gqa:
+                            return _orig_sdpa(
+                                query, key, value, attn_mask=attn_mask, dropout_p=dropout_p,
+                                is_causal=is_causal, scale=scale, enable_gqa=enable_gqa,
+                            )
+                        try:
+                            return _sa.sageattn(query, key, value, is_causal=is_causal, sm_scale=scale)
+                        except Exception:
+                            return _orig_sdpa(query, key, value, is_causal=is_causal, scale=scale)
+
+                torch.nn.functional.scaled_dot_product_attention = _sage_sdpa
+                print(f"[gpu{gpu_idx}] sage-attn v{sage_v} monkey-patch installed", flush=True)
+            except Exception as e:
+                print(f"[gpu{gpu_idx}] sage-attn v{sage_v} import FAILED: {e!r}", flush=True)
+
         pipe = Flux2KleinKVPipeline.from_pretrained(KLEIN_REPO, torch_dtype=torch.bfloat16)
         pipe.vae = AutoencoderKLFlux2.from_pretrained(DECODER_REPO, torch_dtype=torch.bfloat16)
         pipe.to(device)
@@ -101,15 +151,28 @@ def worker_main(gpu_idx: int, ctrl_in, data_out):
             bad = ("pe_embedder", "norm_", "_norm", "embed", "out_proj")
             return not any(b in fqn.lower() for b in bad)
 
+        # Production winner from torchao_sweep: PerTensor (vs PerRow) wins on
+        # Blackwell sm_120 — same VRAM, 1ms faster, half the quality drift.
         try:
-            cfg = Float8DynamicActivationFloat8WeightConfig(granularity=PerRow()) if PerRow else Float8DynamicActivationFloat8WeightConfig()
-        except TypeError:
+            from torchao.quantization.granularity import PerTensor
+            cfg = Float8DynamicActivationFloat8WeightConfig(granularity=PerTensor())
+        except Exception:
             cfg = Float8DynamicActivationFloat8WeightConfig()
         quantize_(pipe.transformer, cfg, filter_fn=fp8_filter)
 
-        pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=False, dynamic=False)
-        pipe.vae.encoder = torch.compile(pipe.vae.encoder, mode="default", fullgraph=False, dynamic=False)
-        pipe.vae.decoder = torch.compile(pipe.vae.decoder, mode="default", fullgraph=False, dynamic=False)
+        # Optional VAE fp8 (saves ~1ms; sweep cell 7).
+        if os.environ.get("BENCH_VAE_FP8", "1") != "0":
+            def fp8_filter_vae(module, fqn):
+                if not isinstance(module, torch.nn.Linear): return False
+                if "transformer" in fqn: return False
+                bad = ("post_quant_conv", "bn", "norm_", "_norm")
+                return not any(b in fqn.lower() for b in bad)
+            quantize_(pipe.vae, cfg, filter_fn=fp8_filter_vae)
+
+        compile_mode = os.environ.get("BENCH_COMPILE_MODE", "default")
+        pipe.transformer = torch.compile(pipe.transformer, mode=compile_mode, fullgraph=False, dynamic=False)
+        pipe.vae.encoder = torch.compile(pipe.vae.encoder, mode=compile_mode, fullgraph=False, dynamic=False)
+        pipe.vae.decoder = torch.compile(pipe.vae.decoder, mode=compile_mode, fullgraph=False, dynamic=False)
 
         r = pipe.encode_prompt(prompt=PROMPT, device=device, num_images_per_prompt=1, max_sequence_length=MAX_SEQ_LEN)
         prompt_embeds = r[0] if isinstance(r, tuple) else r
@@ -309,8 +372,11 @@ def main():
             "n_steps": N_STEPS,
             "alpha": ALPHA,
             "max_seq_len": MAX_SEQ_LEN,
-            "compile_mode": "default",
-            "fp8": "Float8DynamicActivationFloat8WeightConfig (PerRow)",
+            "compile_mode": os.environ.get("BENCH_COMPILE_MODE", "default"),
+            "fp8": "Float8DynamicActivationFloat8WeightConfig (PerTensor)",
+            "vae_fp8": os.environ.get("BENCH_VAE_FP8", "1") != "0",
+            "use_sage": os.environ.get("BENCH_USE_SAGE", "0") == "1",
+            "sage_version": os.environ.get("BENCH_SAGE_VERSION", "1") if os.environ.get("BENCH_USE_SAGE", "0") == "1" else None,
             "sizes": SIZES,
             "timed_iters_per_gpu": TIMED_ITERS_PER_GPU,
         },

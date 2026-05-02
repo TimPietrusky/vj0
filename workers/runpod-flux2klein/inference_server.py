@@ -73,7 +73,22 @@ DEFAULT_SEED = 42
 MAX_SEQ_LEN = 64
 JPEG_QUALITY = 80
 WARMUP_ITERS = 4
-USE_FP8 = True        # flip to False to disable fp8 quantization (debug only)
+USE_FP8 = True                                          # fp8 on transformer
+USE_VAE_FP8 = os.environ.get("USE_VAE_FP8", "1") != "0"  # also quantize VAE linears (saves ~1ms, +0.2GB free, +0.0015 mse)
+# torch.compile mode. "reduce-overhead" is the bench-A winner on Blackwell
+# sm_120 with fp8 transformer: it folds per-step launches into a CUDA graph,
+# yielding +13% throughput at 256²/4-step (50.67 vs 44.93 fps dual-GPU) and
+# +8.5% at 512² (17.11 vs 15.77 fps), with no warmup penalty beyond the
+# first-iter capture. RESULTS.md's old crash (PEFT view in fp8wo path) is
+# fixed under torch 2.11 + torchao 0.17.
+#
+# "default" — conservative fallback, no CUDA graphs.
+# "max-autotune" — REGRESSION on Blackwell sm_120 (Bench B 2026-05-01).
+#   Triton requested 122-196 KB shared memory per block; sm_120's hardware
+#   limit is 101 KB/SM, so every variant fails the autotune search and we
+#   fall back to a slower default kernel. Avoid until Blackwell-aware
+#   autotune templates ship in torch 2.12+.
+COMPILE_MODE = os.environ.get("COMPILE_MODE", "reduce-overhead")
 
 
 # ---- output helpers (line-buffered JSON to stdout) ---- #
@@ -86,7 +101,7 @@ def log(text):
 
 
 # ---- pipeline setup ---- #
-def _fp8_filter(module, fqn):
+def _fp8_filter_transformer(module, fqn):
     """Quantize transformer linear layers only. Skip pe_embedder, norms, embeds —
     same shape as Pruna's smash_config to keep precision-sensitive layers in bf16."""
     if not isinstance(module, torch.nn.Linear):
@@ -95,6 +110,28 @@ def _fp8_filter(module, fqn):
         return False
     bad = ("pe_embedder", "norm_", "_norm", "embed", "out_proj")
     return not any(b in fqn.lower() for b in bad)
+
+
+def _fp8_filter_vae(module, fqn):
+    """Quantize VAE Linear layers only. The VAE is mostly Conv2d (which torchao
+    fp8 doesn't quantize), so this only catches the attention-block linears.
+    Skip the BN normalization linears and any post-quant projections to avoid
+    hurting RGB output precision more than necessary.
+
+    Sweep cell 7 (per-tensor + all_linears, which includes VAE linears) ran 1ms
+    faster than per-tensor + transformer-only at the cost of mse 0.0023 vs 0.0008
+    drift in the final output. For pixelated/sharpened VJ output that drift is
+    invisible; gated by USE_VAE_FP8 env so quality-critical workflows can opt out.
+    """
+    if not isinstance(module, torch.nn.Linear):
+        return False
+    if "transformer" in fqn:
+        return False  # already covered by _fp8_filter_transformer
+    bad = ("post_quant_conv", "bn", "norm_", "_norm")
+    return not any(b in fqn.lower() for b in bad)
+
+
+# Tiny helper: emit a phase event from anywhere in setup.
 
 
 def emit_phase(stage, **extra):
@@ -148,19 +185,24 @@ def setup_pipeline():
             except TypeError:
                 cfg = Float8DynamicActivationFloat8WeightConfig()
             t_q = time.perf_counter()
-            quantize_(pipe.transformer, cfg, filter_fn=_fp8_filter)
-            log(f"fp8 applied in {time.perf_counter()-t_q:.1f}s, "
+            quantize_(pipe.transformer, cfg, filter_fn=_fp8_filter_transformer)
+            log(f"fp8 applied to transformer in {time.perf_counter()-t_q:.1f}s, "
                 f"vram={torch.cuda.memory_allocated()/1e9:.2f}GB")
+            if USE_VAE_FP8:
+                t_q = time.perf_counter()
+                quantize_(pipe.vae, cfg, filter_fn=_fp8_filter_vae)
+                log(f"fp8 applied to VAE linears in {time.perf_counter()-t_q:.1f}s, "
+                    f"vram={torch.cuda.memory_allocated()/1e9:.2f}GB")
         except Exception as e:
             log(f"WARNING: fp8 quantization failed ({type(e).__name__}: {e}); "
                 f"continuing in bf16. Set USE_FP8=False to skip this attempt.")
 
     emit_phase("registering_compile_stubs", est_seconds=1)
-    log("compiling transformer + vae.encoder + vae.decoder (mode=default)...")
+    log(f"compiling transformer + vae.encoder + vae.decoder (mode={COMPILE_MODE})...")
     t1 = time.perf_counter()
-    pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=False, dynamic=False)
-    pipe.vae.encoder = torch.compile(pipe.vae.encoder, mode="default", fullgraph=False, dynamic=False)
-    pipe.vae.decoder = torch.compile(pipe.vae.decoder, mode="default", fullgraph=False, dynamic=False)
+    pipe.transformer = torch.compile(pipe.transformer, mode=COMPILE_MODE, fullgraph=False, dynamic=False)
+    pipe.vae.encoder = torch.compile(pipe.vae.encoder, mode=COMPILE_MODE, fullgraph=False, dynamic=False)
+    pipe.vae.decoder = torch.compile(pipe.vae.decoder, mode=COMPILE_MODE, fullgraph=False, dynamic=False)
     log(f"compile stubs registered in {time.perf_counter()-t1:.1f}s "
         f"(actual JIT happens on first call per (height, width, steps) shape; "
         f"with fp8 expect ~80-160 s extra warmup at the first new resolution)")
@@ -383,6 +425,14 @@ def main():
         if "image_base64" not in req:
             continue
 
+        # Per-stage timing for "where does the 70 ms actually go?" — surfaced
+        # in the stats payload so the frontend can show a debug overlay AND
+        # we can profile from the server log without instrumenting per-call.
+        # Sync between stages so each ms is attributed to the correct phase
+        # (CUDA work is async by default; without sync points the last stage
+        # would absorb everyone else's GPU time).
+        t_frame_start = time.perf_counter()
+
         try:
             raw = base64.b64decode(req["image_base64"])
             input_img = bytes_to_pil(
@@ -391,26 +441,47 @@ def main():
         except Exception as e:
             emit(status="error", message=f"decode input failed: {e}")
             continue
+        t_decode_in = time.perf_counter()
 
         try:
             embeds = prompt_cache.get(state["prompt"])
+            t_prompt = time.perf_counter()
+
             torch.cuda.synchronize()
             t0 = time.perf_counter()
             lat = encode_image_to_latents(pipe, input_img, state["width"], state["height"])
+            torch.cuda.synchronize()
+            t_vae_encode = time.perf_counter()
+
             out = generate(pipe, lat, embeds,
                            state["alpha"], state["n_steps"],
                            state["height"], state["width"], state["seed"])
             torch.cuda.synchronize()
-            gen_ms = (time.perf_counter() - t0) * 1000
+            t_transformer = time.perf_counter()
+            gen_ms = (t_transformer - t0) * 1000
             frame_count += 1
 
             jpg = pil_to_jpeg_bytes(out, JPEG_QUALITY)
+            t_jpeg = time.perf_counter()
+
+            timing = {
+                "decode_in_ms": round((t_decode_in - t_frame_start) * 1000, 2),
+                "prompt_ms": round((t_prompt - t_decode_in) * 1000, 2),  # ~0 unless prompt changed
+                "vae_encode_ms": round((t_vae_encode - t0) * 1000, 2),
+                "transformer_plus_decode_ms": round((t_transformer - t_vae_encode) * 1000, 2),
+                "jpeg_ms": round((t_jpeg - t_transformer) * 1000, 2),
+                "total_ms": round((t_jpeg - t_frame_start) * 1000, 2),
+            }
             emit(
                 status="frame",
                 image_base64=base64.b64encode(jpg).decode("ascii"),
                 gen_time_ms=round(gen_ms, 1),
                 width=state["width"], height=state["height"],
+                timing=timing,
             )
+            # Periodic log so we can see the breakdown without DEBUG_FRAMES.
+            if frame_count % 50 == 1:
+                log(f"timing@frame{frame_count}: {timing}")
         except Exception as e:
             import traceback
             log(traceback.format_exc())
