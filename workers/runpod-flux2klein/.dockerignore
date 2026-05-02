@@ -38,9 +38,9 @@ verify-out/
 verify-real/
 zimage-bench*/
 
-# bench summaries
-*.json
-torchao-sweep-*.json
+# bench summaries (explicit list — never use *.json, that would also exclude
+# package.json which the Dockerfile needs for `npm install`)
+torchao-sweep-summary.json
 baseline-summary.json
 
 # Markdown docs (read in repo, not needed in image)
