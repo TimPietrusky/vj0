@@ -102,7 +102,7 @@ function spawnWorker(gpu) {
     stdio: ["pipe", "pipe", "inherit"],
     env,
   });
-  const w = { proc, gpu, ready: false, stdoutBuf: "", framePending: 0 };
+  const w = { proc, gpu, ready: false, stdoutBuf: "", framePending: 0, lastFrameAt: 0 };
   workers.push(w);
 
   proc.stdout.on("data", (chunk) => {
@@ -224,6 +224,9 @@ function handleWorkerLine(w, line) {
   if (msg.status === "frame") {
     w.framePending = Math.max(0, w.framePending - 1);
     w.framesProduced = (w.framesProduced || 0) + 1;
+    w.lastFrameAt = Date.now();
+    diagStats.framesFromWorker++;
+    diagStats.lastWorkerFrameAt = Date.now();
     if (process.env.DEBUG_FRAMES) {
       console.log(`[worker ${w.gpu}] frame ${w.framesProduced} ${msg.gen_time_ms}ms ${msg.width}x${msg.height}`);
     }
@@ -231,8 +234,11 @@ function handleWorkerLine(w, line) {
     // frame; stale frames in flight are useless and would wedge the channel.
     if (activeChannel?.readyState === "open") {
       const buffered = activeChannel.bufferedAmount || 0;
+      diagStats.channelBufferedAmount = buffered;
+      diagStats.channelState = activeChannel.readyState;
       if (buffered > MAX_OUTBOUND_BUFFER) {
         droppedOutbound++;
+        diagStats.droppedOutbound++;
         if (droppedOutbound % 10 === 1) {
           console.log(`[dispatch] dropped frame from worker ${w.gpu} (channel buffer ${buffered} > ${MAX_OUTBOUND_BUFFER}; total dropped=${droppedOutbound})`);
         }
@@ -250,6 +256,14 @@ function handleWorkerLine(w, line) {
         // where the latency budget is going (vae encode vs transformer vs jpeg).
         timing: msg.timing,
       }));
+      diagStats.framesToClient++;
+      diagStats.lastSentToClientAt = Date.now();
+    } else {
+      // Channel not open — log it so we can see if frames are being produced
+      // but can't be delivered.
+      if ((w.framesProduced % 50) === 1) {
+        console.log(`[DIAG] frame from worker ${w.gpu} but channel=${activeChannel?.readyState || "null"}`);
+      }
     }
     return;
   }
@@ -333,6 +347,7 @@ function dispatchFrame(frameMsg) {
   // skip the JSON encode + stdin round-trip + bytes over the pipe.
   if (w.framePending >= MAX_PENDING_PER_WORKER) {
     droppedInbound++;
+    diagStats.droppedInbound++;
     if (droppedInbound % 10 === 1) {
       console.log(`[dispatch] dropped frame (worker ${w.gpu} saturated, pending=${w.framePending}, total dropped=${droppedInbound})`);
     }
@@ -342,6 +357,7 @@ function dispatchFrame(frameMsg) {
     const ok = w.proc.stdin.write(JSON.stringify(frameMsg) + "\n");
     w.framePending++;
     w.framesDispatched = (w.framesDispatched || 0) + 1;
+    diagStats.framesToWorker++;
     if (process.env.DEBUG_FRAMES) {
       console.log(`[dispatch] frame ${w.framesDispatched} → worker ${w.gpu} (pending=${w.framePending}${ok ? '' : ', backpressured'})`);
     }
@@ -402,6 +418,16 @@ function closeActivePc() {
   if (disconnectTimer) {
     clearTimeout(disconnectTimer);
     disconnectTimer = null;
+  }
+  // Reset worker pending counts — in-flight frames from the dying connection
+  // are stale. Results that trickle back will harmlessly clamp to 0 via
+  // Math.max(0, framePending - 1). Without this reset, workers stay at
+  // MAX_PENDING and dispatchFrame() drops every new frame → deadlock.
+  for (const w of workers) {
+    if (w.framePending > 0) {
+      console.log(`[worker ${w.gpu}] reset framePending ${w.framePending} → 0 (connection replaced)`);
+      w.framePending = 0;
+    }
   }
   if (activeChannel) {
     try { activeChannel.close(); } catch {}
@@ -478,7 +504,7 @@ app.post("/webrtc/offer", async (req, res) => {
 
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
-    console.log("Connection state:", s);
+    console.log(`[DIAG] Connection state: ${s} (channel=${activeChannel?.readyState || "none"} buf=${activeChannel?.bufferedAmount || 0})`);
     if (s === "connected" || s === "completed") {
       if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
       return;
@@ -518,14 +544,20 @@ app.post("/webrtc/offer", async (req, res) => {
           console.log("Invalid JSON from client");
         }
       } else {
+        diagStats.framesFromClient++;
+        diagStats.lastClientFrameAt = Date.now();
         const buffer = Buffer.from(ev.data);
         const base64 = buffer.toString("base64");
         sendToInference({ image_base64: base64 });
       }
     };
     channel.onclose = () => {
-      console.log("DataChannel closed");
+      console.log(`[DIAG] DataChannel CLOSED (was ${diagStats.channelState})`);
+      diagStats.channelState = "closed";
       if (activeChannel === channel) activeChannel = null;
+    };
+    channel.onerror = (err) => {
+      console.log(`[DIAG] DataChannel ERROR: ${err?.error?.message || err?.message || err}`);
     };
   };
 
@@ -546,6 +578,109 @@ app.post("/webrtc/offer", async (req, res) => {
   }
 });
 
+// ---------------- diagnostics ---------------- //
+// Tracks frame flow, event loop health, memory, and DataChannel state.
+// All data exposed via /debug endpoint and logged every DIAG_INTERVAL_MS.
+
+const DIAG_INTERVAL_MS = 5000; // dump stats every 5s
+const diagStats = {
+  framesFromClient: 0,       // binary frames received from WebRTC client
+  framesToWorker: 0,         // frames dispatched to worker stdin
+  framesFromWorker: 0,       // frame results from worker stdout
+  framesToClient: 0,         // frames sent back over WebRTC channel
+  droppedInbound: 0,         // dropped because worker saturated
+  droppedOutbound: 0,        // dropped because channel congested
+  lastClientFrameAt: 0,      // when we last got a frame from the client
+  lastWorkerFrameAt: 0,      // when a worker last produced a frame
+  lastSentToClientAt: 0,     // when we last sent a frame to the client
+  channelBufferedAmount: 0,  // latest DataChannel bufferedAmount
+  channelState: "none",      // latest DataChannel readyState
+  eventLoopLagMs: 0,         // max event loop lag since last dump
+  eventLoopLagTotal: 0,      // accumulated lag for average
+  eventLoopChecks: 0,
+  startedAt: Date.now(),
+};
+
+// Event loop lag detector — fires every 500ms, measures actual vs expected delay.
+// If the event loop is blocked (GC, large JSON parse, etc.), the delay exceeds 500ms.
+let _lastLoopCheck = Date.now();
+setInterval(() => {
+  const now = Date.now();
+  const expected = 500;
+  const actual = now - _lastLoopCheck;
+  const lag = Math.max(0, actual - expected);
+  if (lag > diagStats.eventLoopLagMs) diagStats.eventLoopLagMs = lag;
+  diagStats.eventLoopLagTotal += lag;
+  diagStats.eventLoopChecks++;
+  _lastLoopCheck = now;
+  // Alert on severe lag (>500ms = half-second event loop stall)
+  if (lag > 500) {
+    console.log(`[DIAG] ⚠️  EVENT LOOP LAG ${lag}ms`);
+  }
+}, 500);
+
+// Periodic state dump
+setInterval(() => {
+  const now = Date.now();
+  const uptimeS = ((now - diagStats.startedAt) / 1000).toFixed(0);
+  const mem = process.memoryUsage();
+  const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(1);
+  const rssMB = (mem.rss / 1024 / 1024).toFixed(1);
+  const avgLag = diagStats.eventLoopChecks > 0
+    ? (diagStats.eventLoopLagTotal / diagStats.eventLoopChecks).toFixed(1)
+    : "0";
+
+  const workerSummary = workers.map(w =>
+    `gpu${w.gpu}:${w.ready ? "R" : "x"} pend=${w.framePending} frames=${w.framesProduced || 0} buf=${w.stdoutBuf.length}`
+  ).join(" | ");
+
+  const sinceClient = diagStats.lastClientFrameAt ? ((now - diagStats.lastClientFrameAt) / 1000).toFixed(1) : "never";
+  const sinceWorker = diagStats.lastWorkerFrameAt ? ((now - diagStats.lastWorkerFrameAt) / 1000).toFixed(1) : "never";
+  const sinceSent = diagStats.lastSentToClientAt ? ((now - diagStats.lastSentToClientAt) / 1000).toFixed(1) : "never";
+
+  console.log(
+    `[DIAG] t=${uptimeS}s ` +
+    `in=${diagStats.framesFromClient} →wk=${diagStats.framesToWorker} ←wk=${diagStats.framesFromWorker} →cl=${diagStats.framesToClient} ` +
+    `drop_in=${diagStats.droppedInbound} drop_out=${diagStats.droppedOutbound} | ` +
+    `since: client=${sinceClient}s worker=${sinceWorker}s sent=${sinceSent}s | ` +
+    `ch=${diagStats.channelState} buf=${diagStats.channelBufferedAmount} | ` +
+    `lag: max=${diagStats.eventLoopLagMs}ms avg=${avgLag}ms | ` +
+    `heap=${heapMB}MB rss=${rssMB}MB | ` +
+    `${workerSummary}`
+  );
+
+  // Reset per-interval peaks
+  diagStats.eventLoopLagMs = 0;
+}, DIAG_INTERVAL_MS);
+
+// /debug endpoint — live JSON snapshot for quick checks
+app.get("/debug", (_req, res) => {
+  const now = Date.now();
+  res.json({
+    uptime_s: ((now - diagStats.startedAt) / 1000).toFixed(0),
+    stats: { ...diagStats },
+    memory: process.memoryUsage(),
+    workers: workers.map(w => ({
+      gpu: w.gpu,
+      ready: w.ready,
+      framePending: w.framePending,
+      framesProduced: w.framesProduced || 0,
+      framesDispatched: w.framesDispatched || 0,
+      lastFrameAt: w.lastFrameAt,
+      stdoutBufLen: w.stdoutBuf.length,
+    })),
+    channel: activeChannel ? {
+      readyState: activeChannel.readyState,
+      bufferedAmount: activeChannel.bufferedAmount,
+      label: activeChannel.label,
+    } : null,
+    connection: activePc ? {
+      connectionState: activePc.connectionState,
+      iceConnectionState: activePc.iceConnectionState,
+    } : null,
+  });
+});
+
 // ---------------- bootstrap ---------------- //
 
 console.log(`VJ FLUX.2 Klein WebRTC server starting (workers=${WORKER_COUNT})`);
@@ -554,6 +689,35 @@ for (let i = 0; i < WORKER_COUNT; i++) spawnWorker(i);
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Listening on 0.0.0.0:${PORT} (workers=${WORKER_COUNT})`);
 });
+
+// ---------------- watchdog ---------------- //
+// If a worker has pending frames but hasn't produced output in 30s, it's hung
+// (typically a CUDA graph stall). Kill the process — the "close" handler
+// auto-respawns it on the same GPU. The other worker keeps serving while the
+// dead one reboots (~30-60s warm, ~3 min cold).
+const WATCHDOG_INTERVAL_MS = 5000;
+const WATCHDOG_STALL_MS = 30000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const w of workers) {
+    if (!w.ready || w.framePending === 0) continue;
+    // lastFrameAt is 0 before the first frame — skip (still compiling).
+    if (w.lastFrameAt === 0) continue;
+    const stalled = now - w.lastFrameAt;
+    if (stalled > WATCHDOG_STALL_MS) {
+      console.log(`[watchdog] worker ${w.gpu} stalled ${(stalled / 1000).toFixed(1)}s with pending=${w.framePending} stdoutBuf=${w.stdoutBuf.length}, killing for respawn`);
+      w.ready = false;
+      w.framePending = 0;
+      try { w.proc.kill("SIGKILL"); } catch {}
+    }
+    // Warn if stdout buffer is growing — means worker is writing faster than
+    // we parse, or a partial JSON line is stuck (incomplete newline = pipe stall)
+    if (w.stdoutBuf.length > 512 * 1024) {
+      console.log(`[DIAG] ⚠️  worker ${w.gpu} stdoutBuf=${(w.stdoutBuf.length / 1024).toFixed(0)}KB — possible pipe stall`);
+    }
+  }
+}, WATCHDOG_INTERVAL_MS);
 
 // Graceful shutdown
 function shutdown() {

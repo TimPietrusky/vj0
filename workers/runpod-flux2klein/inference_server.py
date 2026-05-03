@@ -213,22 +213,40 @@ def setup_pipeline():
 
 
 class PromptCache:
-    """Cache prompt embeds per (prompt, max_seq_len) — text encoder runs once per change."""
+    """Cache prompt embeds per (prompt, max_seq_len) — text encoder runs once per change.
+
+    The text encoder is NOT compiled with CUDA graphs (only the transformer is).
+    Under reduce-overhead mode, the main CUDA stream owns the graph-replay pool.
+    Running the uncompiled text encoder on that same stream between graph replays
+    can corrupt the pool's memory layout → permanent GPU hang.
+
+    Fix: run encode_prompt on a DEDICATED side stream, fully synchronize both
+    streams before returning. The graph-replay stream never sees foreign ops.
+    """
     def __init__(self, pipe):
         self.pipe = pipe
         self.embeds = None
         self.last_prompt = None
         self.last_max_seq = None
+        # Dedicated CUDA stream for text encoding — keeps it off the
+        # graph-replay default stream.
+        self._encode_stream = torch.cuda.Stream()
 
     def get(self, prompt: str, max_seq_len: int = MAX_SEQ_LEN):
         if prompt == self.last_prompt and max_seq_len == self.last_max_seq and self.embeds is not None:
             return self.embeds
         log(f"encoding prompt (len={len(prompt)} chars, max_seq={max_seq_len})")
         t0 = time.perf_counter()
-        r = self.pipe.encode_prompt(
-            prompt=prompt, device="cuda",
-            num_images_per_prompt=1, max_sequence_length=max_seq_len,
-        )
+        # Ensure any pending graph-replay work is done before we touch the GPU
+        # from a different stream.
+        torch.cuda.synchronize()
+        with torch.cuda.stream(self._encode_stream):
+            r = self.pipe.encode_prompt(
+                prompt=prompt, device="cuda",
+                num_images_per_prompt=1, max_sequence_length=max_seq_len,
+            )
+        # Wait for encode to finish before the main stream uses the result.
+        self._encode_stream.synchronize()
         self.embeds = r[0] if isinstance(r, tuple) else r
         self.last_prompt = prompt
         self.last_max_seq = max_seq_len
@@ -334,10 +352,13 @@ def main():
         "capture_height": DEFAULT_HEIGHT,
     }
 
-    # Warmup all shapes from WARMUP_SHAPES env (comma-separated WxH list, e.g.
-    # "256x256,512x288,512x512"). Default = just the current state. Each shape
-    # adds ~150s but only once at startup; once warmed, switching to that shape
-    # at runtime is a torch.compile cache hit and re-warms in <1s.
+    # Warmup shapes from WARMUP_SHAPES env (comma-separated WxH list, e.g.
+    # "512x288,768x448,256x144"). Order matters: first shape compiles before
+    # the worker goes READY, so put the most-used production resolution first.
+    # Remaining shapes compile in a background thread — switching to one mid-set
+    # triggers the already-running background compile (or a ~35-150s cold compile
+    # if background hasn't reached it yet). With warm Inductor cache, each shape
+    # re-warms in <1s regardless.
     shapes_env = os.environ.get("WARMUP_SHAPES", "")
     shapes = []
     for s in shapes_env.split(","):
@@ -350,21 +371,74 @@ def main():
             log(f"WARMUP_SHAPES: skipping invalid token '{s}'")
     if not shapes:
         shapes = [(state["width"], state["height"])]
-    log(f"warming up shapes: {shapes}")
-    last_warmed = None
-    for w, h in shapes:
-        warmup(pipe, prompt_cache, w, h, state["alpha"], state["n_steps"])
-        last_warmed = (w, h)
-    # Position state at the LAST warmed shape so first user request at that
-    # shape doesn't trigger another warmup.
-    if last_warmed is not None:
-        state["width"], state["height"] = last_warmed
+    log(f"warming up shapes: {shapes} (first={shapes[0]}, rest in background)")
+
+    # Warm the FIRST shape synchronously — this is the "go live" resolution.
+    first_w, first_h = shapes[0]
+    warmup(pipe, prompt_cache, first_w, first_h, state["alpha"], state["n_steps"])
+    state["width"], state["height"] = first_w, first_h
 
     emit(status="ready", width=state["width"], height=state["height"])
+    log(f"READY after first shape {first_w}x{first_h} — remaining {len(shapes)-1} shapes warming in background")
 
-    # incoming requests queue (so we can drop stale frames if behind)
+    # GPU lock — serialize all forward passes (warmup + inference). The
+    # background warmup thread and the main inference loop both hit the
+    # same GPU; without a lock, concurrent forward passes corrupt CUDA
+    # state or crash with "CUDA error: an illegal memory access".
+    gpu_lock = threading.Lock()
+
+    # Track which shapes are already compiled so the main loop can skip
+    # re-warmup for shapes the background thread already handled.
+    warmed_shapes = {(first_w, first_h)}
+
+    # Warm remaining shapes in a background thread so the main loop can
+    # start serving frames immediately. The thread acquires gpu_lock for
+    # each warmup call, yielding it between shapes so the main loop can
+    # interleave inference frames at the current resolution.
+    remaining_shapes = shapes[1:]
+    if remaining_shapes:
+        def _bg_warmup():
+            for i, (w, h) in enumerate(remaining_shapes):
+                log(f"[bg-warmup] {i+1}/{len(remaining_shapes)}: {w}x{h}")
+                with gpu_lock:
+                    warmup(pipe, prompt_cache, w, h, state["alpha"], state["n_steps"])
+                warmed_shapes.add((w, h))
+            log(f"[bg-warmup] done — all {len(shapes)} shapes compiled")
+        bg_thread = threading.Thread(target=_bg_warmup, daemon=True)
+        bg_thread.start()
+
+    # Frame queue: ONLY image_base64 requests go here. State-only messages
+    # (prompt, seed, etc.) are applied immediately in the reader thread.
+    # This prevents rapid state changes from evicting frame messages — the
+    # root cause of the "both workers hang" bug: server dispatches frames,
+    # worker queue drops them in favor of state-only msgs, worker sits idle,
+    # server thinks pend=3 → deadlock → watchdog kill.
     request_queue = queue.Queue(maxsize=2)
     shutdown = threading.Event()
+    # Lock protecting state dict against concurrent reader-thread writes
+    # vs main-loop reads. Lightweight — only guards dict assignment, never
+    # held during GPU work.
+    state_lock = threading.Lock()
+
+    def _apply_state(data):
+        """Apply settings fields from a parsed JSON message. Called from the
+        reader thread for state-only messages and from the main loop for
+        frame messages that also carry state fields."""
+        with state_lock:
+            if "prompt" in data:
+                state["prompt"] = data["prompt"]
+            if "seed" in data:
+                state["seed"] = int(data["seed"])
+            if "alpha" in data:
+                state["alpha"] = float(data["alpha"])
+            if "n_steps" in data:
+                state["n_steps"] = int(data["n_steps"])
+            if "width" in data:
+                state["width"] = int(data["width"])
+                state["height"] = int(data.get("height", data["width"]))
+            if "captureWidth" in data:
+                state["capture_width"] = int(data["captureWidth"])
+                state["capture_height"] = int(data.get("captureHeight", data["captureWidth"]))
 
     def reader():
         for line in sys.stdin:
@@ -377,11 +451,18 @@ def main():
             if data.get("command") == "shutdown":
                 shutdown.set()
                 break
-            # newest frame wins — drop older queued frame if queue full
-            if request_queue.full():
-                try: request_queue.get_nowait()
-                except queue.Empty: pass
-            request_queue.put(data)
+
+            # Always apply state fields immediately (thread-safe via state_lock)
+            _apply_state(data)
+
+            # Only queue messages that carry a frame — state-only messages
+            # are fully handled above and must NOT enter the queue where
+            # they'd evict frame messages.
+            if "image_base64" in data:
+                if request_queue.full():
+                    try: request_queue.get_nowait()
+                    except queue.Empty: pass
+                request_queue.put(data)
 
     threading.Thread(target=reader, daemon=True).start()
 
@@ -395,33 +476,28 @@ def main():
         except queue.Empty:
             continue
 
-        # update settings from request (non-image fields)
-        if "prompt" in req:
-            state["prompt"] = req["prompt"]
-        if "seed" in req:
-            state["seed"] = int(req["seed"])
-        if "alpha" in req:
-            state["alpha"] = float(req["alpha"])
-        if "n_steps" in req:
-            state["n_steps"] = int(req["n_steps"])
-        if "width" in req:
-            state["width"] = int(req["width"])
-            state["height"] = int(req.get("height", req["width"]))
-        if "captureWidth" in req:
-            state["capture_width"] = int(req["captureWidth"])
-            state["capture_height"] = int(req.get("captureHeight", req["captureWidth"]))
+        # State was already applied by the reader thread. Re-apply in case
+        # this frame message carried state fields (belt-and-suspenders).
+        _apply_state(req)
 
-        # if resolution or step count changed, re-warmup at new shape
+        # if resolution changed, re-warmup at new shape (skip if background
+        # thread already compiled it — just update last_size to avoid re-trigger)
         new_size = (state["width"], state["height"])
         if new_size != last_size:
-            log(f"resolution changed → {state['width']}×{state['height']}, re-warming")
-            try:
-                warmup(pipe, prompt_cache, state["width"], state["height"],
-                       state["alpha"], state["n_steps"])
+            if new_size in warmed_shapes:
+                log(f"resolution changed → {state['width']}×{state['height']}, already compiled by bg-warmup")
                 last_size = new_size
-            except Exception as e:
-                emit(status="error", message=f"warmup failed: {e}")
-                continue
+            else:
+                log(f"resolution changed → {state['width']}×{state['height']}, re-warming")
+                try:
+                    with gpu_lock:
+                        warmup(pipe, prompt_cache, state["width"], state["height"],
+                               state["alpha"], state["n_steps"])
+                    warmed_shapes.add(new_size)
+                    last_size = new_size
+                except Exception as e:
+                    emit(status="error", message=f"warmup failed: {e}")
+                    continue
 
         # need an image to generate
         if "image_base64" not in req:
@@ -446,20 +522,27 @@ def main():
         t_decode_in = time.perf_counter()
 
         try:
-            embeds = prompt_cache.get(state["prompt"])
-            t_prompt = time.perf_counter()
+            # gpu_lock serializes against the background warmup thread.
+            # Hold it for ALL GPU work: prompt encoding + VAE encode +
+            # transformer + VAE decode. Prompt encoding runs the text
+            # encoder on GPU — doing it outside the lock can corrupt
+            # CUDA graph replay if a prompt change arrives while a
+            # compiled generate() is in flight, causing a permanent hang.
+            with gpu_lock:
+                embeds = prompt_cache.get(state["prompt"])
+                t_prompt = time.perf_counter()
 
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            lat = encode_image_to_latents(pipe, input_img, state["width"], state["height"])
-            torch.cuda.synchronize()
-            t_vae_encode = time.perf_counter()
+                torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                lat = encode_image_to_latents(pipe, input_img, state["width"], state["height"])
+                torch.cuda.synchronize()
+                t_vae_encode = time.perf_counter()
 
-            out = generate(pipe, lat, embeds,
-                           state["alpha"], state["n_steps"],
-                           state["height"], state["width"], state["seed"])
-            torch.cuda.synchronize()
-            t_transformer = time.perf_counter()
+                out = generate(pipe, lat, embeds,
+                               state["alpha"], state["n_steps"],
+                               state["height"], state["width"], state["seed"])
+                torch.cuda.synchronize()
+                t_transformer = time.perf_counter()
             gen_ms = (t_transformer - t0) * 1000
             frame_count += 1
 

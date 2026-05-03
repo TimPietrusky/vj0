@@ -1309,9 +1309,14 @@ export function VJApp() {
     }
 
     if (!aiTransport.isConnected() || !aiTransport.canSend(256 * 1024)) {
+      if ('diag' in aiTransport) {
+        if (!aiTransport.isConnected()) (aiTransport as any).diag.sendSkippedNotConnected++;
+        else (aiTransport as any).diag.sendSkippedBackpressure++;
+      }
       return;
     }
     if (sender.pendingEncode) {
+      if ('diag' in aiTransport) (aiTransport as any).diag.sendSkippedPendingEncode++;
       return;
     }
 

@@ -61,6 +61,28 @@ async function waitForIceGatheringComplete(
   });
 }
 
+/** Live diagnostics — exposed on window.__VJ0_DIAG for console inspection */
+export interface WebRtcDiag {
+  framesSent: number;
+  framesReceived: number;
+  bytesSent: number;
+  bytesReceived: number;
+  settingsSent: number;
+  sendSkippedNotConnected: number;
+  sendSkippedBackpressure: number;
+  sendSkippedPendingEncode: number;
+  lastSentAt: number;
+  lastReceivedAt: number;
+  channelState: string;
+  connectionState: string;
+  iceState: string;
+  bufferedAmount: number;
+  status: AiTransportStatus;
+  errors: string[];
+  stateChanges: Array<{ t: number; from: string; to: string }>;
+  uptimeMs: number;
+}
+
 export class WebRtcAiTransport implements AiTransport {
   private readonly config: WebRtcAiTransportConfig;
 
@@ -75,8 +97,86 @@ export class WebRtcAiTransport implements AiTransport {
   private opToken = 0;
   private disconnectTimer: number | null = null;
 
+  // ── diagnostics ──
+  readonly diag: WebRtcDiag = {
+    framesSent: 0,
+    framesReceived: 0,
+    bytesSent: 0,
+    bytesReceived: 0,
+    settingsSent: 0,
+    sendSkippedNotConnected: 0,
+    sendSkippedBackpressure: 0,
+    sendSkippedPendingEncode: 0,
+    lastSentAt: 0,
+    lastReceivedAt: 0,
+    channelState: "none",
+    connectionState: "none",
+    iceState: "none",
+    bufferedAmount: 0,
+    status: "idle",
+    errors: [],
+    stateChanges: [],
+    uptimeMs: 0,
+  };
+  private diagStartedAt = 0;
+  private diagTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(config: WebRtcAiTransportConfig) {
     this.config = config;
+    // Expose on window for live console inspection: window.__VJ0_DIAG
+    if (typeof window !== "undefined") {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window as any).__VJ0_DIAG = this.diag;
+    }
+  }
+
+  private diagLog(msg: string) {
+    const t = this.diagStartedAt ? ((Date.now() - this.diagStartedAt) / 1000).toFixed(1) : "0";
+    console.log(`[VJ0-DIAG t=${t}s] ${msg}`);
+  }
+
+  private diagPushError(msg: string) {
+    this.diag.errors.push(`${new Date().toISOString()} ${msg}`);
+    if (this.diag.errors.length > 50) this.diag.errors.shift();
+    this.diagLog(`ERROR: ${msg}`);
+  }
+
+  private startDiagLoop() {
+    this.diagStartedAt = Date.now();
+    this.diagTimer = setInterval(() => {
+      const d = this.diag;
+      d.uptimeMs = Date.now() - this.diagStartedAt;
+      d.channelState = this.channel?.readyState ?? "null";
+      d.connectionState = this.pc?.connectionState ?? "null";
+      d.iceState = this.pc?.iceConnectionState ?? "null";
+      d.bufferedAmount = this.channel?.bufferedAmount ?? 0;
+      d.status = this.status;
+
+      const sinceSent = d.lastSentAt ? ((Date.now() - d.lastSentAt) / 1000).toFixed(1) : "never";
+      const sinceRecv = d.lastReceivedAt ? ((Date.now() - d.lastReceivedAt) / 1000).toFixed(1) : "never";
+
+      // Alert on stalls
+      const alerts: string[] = [];
+      if (d.lastSentAt && Date.now() - d.lastSentAt > 5000 && d.framesSent > 0) alerts.push("NO_SEND_5s");
+      if (d.lastReceivedAt && Date.now() - d.lastReceivedAt > 10000 && d.framesReceived > 0) alerts.push("NO_RECV_10s");
+      if (d.channelState !== "open" && d.framesSent > 0) alerts.push("CH_NOT_OPEN");
+      if (d.bufferedAmount > 256 * 1024) alerts.push(`BACKPRESSURE_${(d.bufferedAmount / 1024).toFixed(0)}KB`);
+
+      console.log(
+        `[VJ0-DIAG] sent=${d.framesSent} recv=${d.framesReceived} settings=${d.settingsSent} ` +
+        `skip:conn=${d.sendSkippedNotConnected} bp=${d.sendSkippedBackpressure} ` +
+        `| since: sent=${sinceSent}s recv=${sinceRecv}s ` +
+        `| ch=${d.channelState} conn=${d.connectionState} ice=${d.iceState} buf=${d.bufferedAmount} ` +
+        (alerts.length > 0 ? `| ${alerts.join(" ")}` : "")
+      );
+    }, 5000);
+  }
+
+  private stopDiagLoop() {
+    if (this.diagTimer) {
+      clearInterval(this.diagTimer);
+      this.diagTimer = null;
+    }
   }
 
   isConnected(): boolean {
@@ -102,7 +202,12 @@ export class WebRtcAiTransport implements AiTransport {
 
   private setStatus(status: AiTransportStatus) {
     if (this.status === status) return;
+    const prev = this.status;
     this.status = status;
+    this.diag.status = status;
+    this.diag.stateChanges.push({ t: Date.now(), from: prev, to: status });
+    if (this.diag.stateChanges.length > 100) this.diag.stateChanges.shift();
+    this.diagLog(`status: ${prev} → ${status}`);
     this.statusListeners.emit(status);
   }
 
@@ -160,16 +265,23 @@ export class WebRtcAiTransport implements AiTransport {
 
       channel.onopen = () => {
         if (myToken !== this.opToken) return;
+        this.diagLog("DataChannel OPEN");
         this.setStatus("connected");
+        this.startDiagLoop();
       };
 
       channel.onclose = () => {
         if (myToken !== this.opToken) return;
+        this.diagLog(`DataChannel CLOSED (was ${this.status})`);
+        this.stopDiagLoop();
         if (this.status !== "error") this.setStatus("disconnected");
       };
 
-      channel.onerror = () => {
+      channel.onerror = (ev) => {
         if (myToken !== this.opToken) return;
+        const errMsg = (ev as RTCErrorEvent)?.error?.message ?? "unknown";
+        this.diagPushError(`DataChannel error: ${errMsg}`);
+        this.stopDiagLoop();
         this.setStatus("error");
         this.closeConnections();
       };
@@ -202,16 +314,19 @@ export class WebRtcAiTransport implements AiTransport {
           return;
         }
 
-        const blob =
-          event.data instanceof Blob
-            ? event.data
-            : new Blob([event.data as ArrayBuffer]);
+        const raw = event.data instanceof Blob ? event.data : event.data as ArrayBuffer;
+        const size = raw instanceof Blob ? raw.size : raw.byteLength;
+        this.diag.framesReceived++;
+        this.diag.bytesReceived += size;
+        this.diag.lastReceivedAt = Date.now();
+        const blob = raw instanceof Blob ? raw : new Blob([raw]);
         this.frameListeners.emit({ kind: "image", blob });
       };
 
       pc.onconnectionstatechange = () => {
         if (myToken !== this.opToken) return;
         const state = pc.connectionState;
+        this.diagLog(`PC state: ${state} (ice=${pc.iceConnectionState} ch=${channel.readyState})`);
 
         if (state === "connected") {
           if (this.disconnectTimer !== null) {
@@ -289,6 +404,7 @@ export class WebRtcAiTransport implements AiTransport {
 
   async stop(): Promise<void> {
     this.opToken++;
+    this.stopDiagLoop();
     this.closeConnections();
 
     if (this.status !== "idle") {
@@ -298,7 +414,11 @@ export class WebRtcAiTransport implements AiTransport {
 
   sendText(message: string): void {
     const ch = this.channel;
-    if (!ch || ch.readyState !== "open") return;
+    if (!ch || ch.readyState !== "open") {
+      this.diag.sendSkippedNotConnected++;
+      return;
+    }
+    this.diag.settingsSent++;
     ch.send(message);
   }
 
@@ -314,7 +434,14 @@ export class WebRtcAiTransport implements AiTransport {
   /** Send raw binary data directly - no allocation */
   sendBinary(data: ArrayBuffer | ArrayBufferView): void {
     const ch = this.channel;
-    if (!ch || ch.readyState !== "open") return;
+    if (!ch || ch.readyState !== "open") {
+      this.diag.sendSkippedNotConnected++;
+      return;
+    }
+    const size = data instanceof ArrayBuffer ? data.byteLength : data.byteLength;
+    this.diag.framesSent++;
+    this.diag.bytesSent += size;
+    this.diag.lastSentAt = Date.now();
     // Newer lib.dom types narrow RTCDataChannel.send to ArrayBufferView<ArrayBuffer>
     // (i.e. typed arrays NOT backed by a SharedArrayBuffer). Narrow by branch
     // so each call site picks the matching overload — runtime accepts either.
