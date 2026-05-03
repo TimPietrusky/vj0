@@ -213,7 +213,12 @@ def setup_pipeline():
 
 
 class PromptCache:
-    """Cache prompt embeds per (prompt, max_seq_len) — text encoder runs once per change.
+    """LRU cache for prompt embeddings — text encoder runs once per unique prompt.
+
+    Caches up to `max_entries` (prompt, max_seq_len) → embedding pairs. Switching
+    between known presets is a dict lookup (~0ms) instead of a GPU encode (~15-30ms).
+    Each embedding is small (~64 × hidden_dim ≈ 200-400 KB), so 32 entries costs
+    ~10-15 MB VRAM — negligible on a 48 GB card.
 
     The text encoder is NOT compiled with CUDA graphs (only the transformer is).
     Under reduce-overhead mode, the main CUDA stream owns the graph-replay pool.
@@ -223,19 +228,28 @@ class PromptCache:
     Fix: run encode_prompt on a DEDICATED side stream, fully synchronize both
     streams before returning. The graph-replay stream never sees foreign ops.
     """
-    def __init__(self, pipe):
+    def __init__(self, pipe, max_entries: int = 32):
         self.pipe = pipe
-        self.embeds = None
-        self.last_prompt = None
-        self.last_max_seq = None
+        self.max_entries = max_entries
+        # OrderedDict for LRU: most recently used at end.
+        from collections import OrderedDict
+        self._cache: OrderedDict[tuple, torch.Tensor] = OrderedDict()
+        self._hits = 0
+        self._misses = 0
         # Dedicated CUDA stream for text encoding — keeps it off the
         # graph-replay default stream.
         self._encode_stream = torch.cuda.Stream()
 
     def get(self, prompt: str, max_seq_len: int = MAX_SEQ_LEN):
-        if prompt == self.last_prompt and max_seq_len == self.last_max_seq and self.embeds is not None:
-            return self.embeds
-        log(f"encoding prompt (len={len(prompt)} chars, max_seq={max_seq_len})")
+        key = (prompt, max_seq_len)
+        if key in self._cache:
+            # Move to end (most recently used)
+            self._cache.move_to_end(key)
+            self._hits += 1
+            return self._cache[key]
+        self._misses += 1
+        log(f"encoding prompt (len={len(prompt)} chars, max_seq={max_seq_len}) "
+            f"[cache: {len(self._cache)}/{self.max_entries}, hits={self._hits} misses={self._misses}]")
         t0 = time.perf_counter()
         # Ensure any pending graph-replay work is done before we touch the GPU
         # from a different stream.
@@ -247,12 +261,15 @@ class PromptCache:
             )
         # Wait for encode to finish before the main stream uses the result.
         self._encode_stream.synchronize()
-        self.embeds = r[0] if isinstance(r, tuple) else r
-        self.last_prompt = prompt
-        self.last_max_seq = max_seq_len
+        embeds = r[0] if isinstance(r, tuple) else r
+        # Evict oldest if at capacity
+        if len(self._cache) >= self.max_entries:
+            evicted_key, _ = self._cache.popitem(last=False)
+            log(f"prompt cache full, evicted oldest: '{evicted_key[0][:40]}...'")
+        self._cache[key] = embeds
         log(f"prompt encoded in {(time.perf_counter()-t0)*1000:.0f}ms "
-            f"shape={tuple(self.embeds.shape)}")
-        return self.embeds
+            f"shape={tuple(embeds.shape)} [cached {len(self._cache)}/{self.max_entries}]")
+        return embeds
 
 
 def encode_image_to_latents(pipe, img_pil, width, height):
